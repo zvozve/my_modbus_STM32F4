@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <math.h>
+#include <limits.h>
 
 // project_driver
 #include "main.h"
@@ -13,12 +14,6 @@
 #include "tim.h"
 #include "gpio.h"
 #include "usart.h"
-
-#include "modbus_app.h"
-#include "SEGGER_RTT.h"
-
-// user_driver
-//#include "user_gpio.h"
 
 void app_entry(void);
 
