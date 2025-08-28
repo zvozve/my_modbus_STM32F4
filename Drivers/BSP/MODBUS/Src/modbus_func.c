@@ -7,17 +7,30 @@ static FIFO_DMA_Context_t fifo_dma_ctx;
 #endif // ENABLE_MOUBUS_DMACPY
 
 /**
- * @brief       ENABLE_MOUBUS_MASTER
+ * @brief       ENABLE_MB_RTU_MASTER
  * @param       无
  * @retval      无
  */	
-#if ENABLE_MOUBUS_MASTER  
+#if ENABLE_MB_RTU_MASTER  
 mbRTU_t  mbMaster = {0};
 bool     mbMaster_Coils_Buf[MB_BUF_LEN];
 uint16_t mbMaster_Holding_Buf[MB_BUF_LEN];
 
+void mbMaster_cmd_clr(void) {    
+    memset(&mbMaster.Tx, 0, sizeof(mbCommand_t));    
+    memset(&mbMaster.Rx, 0, sizeof(mbCommand_t));    
+}
+
+void mbMaster_transfer_block(uint16_t us) {
+    #if ENABLE_MASTER_TX_BLOCK
+    while (mbMaster_Task.status != MBT_IDLE) {
+        MB_TIM_Delay_us(us);
+    }
+    #endif // ENABLE_MASTER_TX_BLOCK
+}
+
 void mbMaster_Read_Coils            (uint8_t id, uint16_t addr, bool *p_data,     uint8_t cnt) {
-    mbMemClr_Cmd(&mbMaster);
+    mbMaster_cmd_clr();
     
     mbMaster.Tx.fxcode  = READ_COILS;
     mbMaster.Tx.id      = id; // 常量定义默认ID为1
@@ -26,13 +39,11 @@ void mbMaster_Read_Coils            (uint8_t id, uint16_t addr, bool *p_data,   
     mbMaster.Rx.rdBit   = p_data;
     mbMaster_Task.status = MBT_REQUESTING;
     
-    while (mbMaster_Task.status != MBT_IDLE) {
-        MB_TIM_Delay_us(MB_TIM_PERIOD_US);
-    }
+    mbMaster_transfer_block(MB_TIM_PERIOD_US);
 }
 
 void mbMaster_Read_Discrete_Inputs  (uint8_t id, uint16_t addr, bool *p_data,     uint8_t cnt) {
-    mbMemClr_Cmd(&mbMaster);
+    mbMaster_cmd_clr();
     
     mbMaster.Tx.fxcode  = READ_DISCRETE_INPUTS;
     mbMaster.Tx.id      = id; // 常量定义默认ID为1
@@ -41,13 +52,11 @@ void mbMaster_Read_Discrete_Inputs  (uint8_t id, uint16_t addr, bool *p_data,   
     mbMaster.Rx.rdBit =  p_data;
     mbMaster_Task.status = MBT_REQUESTING;
     
-    while (mbMaster_Task.status != MBT_IDLE) {
-        MB_TIM_Delay_us(MB_TIM_PERIOD_US);
-    }
+    mbMaster_transfer_block(MB_TIM_PERIOD_US);
 }
 
 void mbMaster_Read_Holdings         (uint8_t id, uint16_t addr, uint16_t *p_data, uint8_t cnt) {
-    mbMemClr_Cmd(&mbMaster);
+    mbMaster_cmd_clr();
     
     mbMaster.Tx.fxcode  = READ_HOLDING_REGISTERS;
     mbMaster.Tx.id      = id; // 常量定义默认ID为1
@@ -56,13 +65,11 @@ void mbMaster_Read_Holdings         (uint8_t id, uint16_t addr, uint16_t *p_data
     mbMaster.Rx.rdU16   = p_data;
     mbMaster_Task.status = MBT_REQUESTING;
     
-    while (mbMaster_Task.status != MBT_IDLE) {
-        MB_TIM_Delay_us(MB_TIM_PERIOD_US);
-    }
+    mbMaster_transfer_block(MB_TIM_PERIOD_US);
 }
 
 void mbMaster_Read_Input            (uint8_t id, uint16_t addr, uint16_t *p_data, uint8_t cnt) {
-    mbMemClr_Cmd(&mbMaster);
+    mbMaster_cmd_clr();
     
     mbMaster.Tx.fxcode  = READ_INPUT_REGISTERS;
     mbMaster.Tx.id      = id; // 常量定义默认ID为1
@@ -70,14 +77,12 @@ void mbMaster_Read_Input            (uint8_t id, uint16_t addr, uint16_t *p_data
 	mbMaster.Rx.dataCnt = cnt;
     mbMaster.Rx.rdU16   = p_data;
     mbMaster_Task.status = MBT_REQUESTING;
-        
-    while (mbMaster_Task.status != MBT_IDLE) {
-        MB_TIM_Delay_us(MB_TIM_PERIOD_US);
-    }
+    
+    mbMaster_transfer_block(MB_TIM_PERIOD_US);
 }
 
 void mbMaster_Write_Single_Coil     (uint8_t id, uint16_t addr, bool data) {
-    mbMemClr_Cmd(&mbMaster);
+    mbMaster_cmd_clr();
     
 	mbMaster.Tx.fxcode  = WRITE_SINGLE_COIL;
     mbMaster.Tx.id      = id; // 常量定义默认ID为1
@@ -86,13 +91,11 @@ void mbMaster_Write_Single_Coil     (uint8_t id, uint16_t addr, bool data) {
     mbMaster.Tx.wtBit[0] = data;
     mbMaster_Task.status = MBT_REQUESTING;
         
-    while (mbMaster_Task.status != MBT_IDLE) {
-        MB_TIM_Delay_us(MB_TIM_PERIOD_US);
-    }
+    mbMaster_transfer_block(MB_TIM_PERIOD_US);
 }
 
 void mbMaster_Write_Single_Reg      (uint8_t id, uint16_t addr, uint16_t data) {
-    mbMemClr_Cmd(&mbMaster);
+    mbMaster_cmd_clr();
     
 	mbMaster.Tx.fxcode  = WRITE_SINGLE_REGISTER;
     mbMaster.Tx.id      = id; // 常量定义默认ID为1
@@ -101,13 +104,11 @@ void mbMaster_Write_Single_Reg      (uint8_t id, uint16_t addr, uint16_t data) {
     mbMaster.Tx.wtU16[0] = data;
     mbMaster_Task.status = MBT_REQUESTING;
         
-    while (mbMaster_Task.status != MBT_IDLE) {
-        MB_TIM_Delay_us(MB_TIM_PERIOD_US);
-    }
+    mbMaster_transfer_block(MB_TIM_PERIOD_US);
 }
 
 void mbMaster_Write_Multiple_Coils  (uint8_t id, uint16_t addr, bool *p_data,     uint8_t cnt) {
-    mbMemClr_Cmd(&mbMaster);
+    mbMaster_cmd_clr();
     
 	mbMaster.Tx.fxcode  = WRITE_MULTIPLE_COILS;
     mbMaster.Tx.id      = id; // 常量定义默认ID为1
@@ -116,13 +117,11 @@ void mbMaster_Write_Multiple_Coils  (uint8_t id, uint16_t addr, bool *p_data,   
     mbMemCpy_Coils(mbMaster.Tx.wtBit, p_data, cnt);
     mbMaster_Task.status = MBT_REQUESTING;
         
-    while (mbMaster_Task.status != MBT_IDLE) {
-        MB_TIM_Delay_us(MB_TIM_PERIOD_US);
-    }
+    mbMaster_transfer_block(MB_TIM_PERIOD_US);
 }
 
 void mbMaster_Write_Multiple_Regs   (uint8_t id, uint16_t addr, uint16_t *p_data, uint8_t cnt) {
-    mbMemClr_Cmd(&mbMaster);
+    mbMaster_cmd_clr();
     
 	mbMaster.Tx.fxcode  = WRITE_MULTIPLE_REGISTERS;
     mbMaster.Tx.id      = id; // 常量定义默认ID为1
@@ -131,9 +130,7 @@ void mbMaster_Write_Multiple_Regs   (uint8_t id, uint16_t addr, uint16_t *p_data
     mbMemCpy_Regs(mbMaster.Tx.wtU16, p_data, cnt);
     mbMaster_Task.status = MBT_REQUESTING;
         
-    while (mbMaster_Task.status != MBT_IDLE) {
-        MB_TIM_Delay_us(MB_TIM_PERIOD_US);
-    }
+    mbMaster_transfer_block(MB_TIM_PERIOD_US);
 }
 
 mbFxStatus_t mbMaster_Structuring_Request(void) {
@@ -457,17 +454,22 @@ mbFxStatus_t mbMaster_Processing_Response(void) {
     return MB_NO_ERR;
 }
 
-#endif // ENABLE_MOUBUS_MASTER
+#endif // ENABLE_MB_RTU_MASTER
 
 /**
- * @brief       ENABLE_MOUBUS_SLAVE
+ * @brief       ENABLE_MB_RTU_SLAVE
  * @param       无
  * @retval      无
  */	
-#if  ENABLE_MOUBUS_SLAVE 
+#if  ENABLE_MB_RTU_SLAVE 
 mbRTU_t  mbSlave = {0};
 bool     mbSlave_Coils_Buf[MB_BUF_LEN];
 uint16_t mbSlave_Holding_Buf[MB_BUF_LEN];
+
+void mbSlave_cmd_clr(void) {    
+    memset(&mbSlave.Tx, 0, sizeof(mbCommand_t));    
+    memset(&mbSlave.Rx, 0, sizeof(mbCommand_t));    
+}
 
 void mbSlave_Read_Coils             (uint16_t addr, bool *p_data,     uint16_t cnt){
     for (uint16_t i = 0; i < cnt; i++) {
@@ -773,28 +775,12 @@ mbFxStatus_t mbSlave_Structuring_Response(void){
     return MB_NO_ERR; // 数据有效  
 }
 
-#endif // ENABLE_MOUBUS_SLAVE
+#endif // ENABLE_MB_RTU_SLAVE
 
 // ------------------ 通用功能 -------------------------
 /**
  * @brief       数据结构
  */
-void mbMemClr_Cmd(mbRTU_t *mb) {    
-    #if ENABLE_MOUBUS_MASTER  
-    if (mb == &mbMaster) {
-        memset(&mb->Tx, 0, sizeof(mbCommand_t));    
-        memset(&mb->Rx, 0, sizeof(mbCommand_t));    
-    } 
-    #endif // ENABLE_MOUBUS_MASTER
-
-    #if  ENABLE_MOUBUS_SLAVE
-    if (mb == &mbSlave) {
-        memset(&mb->Tx, 0, sizeof(mbCommand_t));    
-        memset(&mb->Rx, 0, sizeof(mbCommand_t));    
-    } 
-    #endif // ENABLE_MOUBUS_SLAVE 
-}
-
 void mbMemCpy_Buf(uint8_t *target, uint8_t *source, uint16_t len) {
     if (target == NULL || source == NULL || len < 1) return;
     for(uint16_t i = 0; i < len; i++){

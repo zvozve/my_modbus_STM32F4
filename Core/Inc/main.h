@@ -61,8 +61,10 @@ void Error_Handler(void);
 #define LED0_GPIO_Port GPIOF
 #define LED1_Pin GPIO_PIN_10
 #define LED1_GPIO_Port GPIOF
-#define RS485_EN_Pin GPIO_PIN_8
-#define RS485_EN_GPIO_Port GPIOG
+#define RS485_EN_U3_Pin GPIO_PIN_7
+#define RS485_EN_U3_GPIO_Port GPIOG
+#define RS485_EN_U2_Pin GPIO_PIN_8
+#define RS485_EN_U2_GPIO_Port GPIOG
 
 /* USER CODE BEGIN Private defines */
 

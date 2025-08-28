@@ -1,8 +1,7 @@
 #ifndef __MODBUS_FUNC_H__
 #define __MODBUS_FUNC_H__
 
-#include "modbus_app.h"
-#include "modbus_uart.h"
+#include "modbus_driver.h"
 
 /**
  * @brief   常量
@@ -106,13 +105,16 @@ typedef struct {
 #endif // ENABLE_MOUBUS_DMACPY
 
 /**
- * @brief   ENABLE_MOUBUS_MASTER
+ * @brief   ENABLE_MB_RTU_MASTER
 */
-#if ENABLE_MOUBUS_MASTER
+#if ENABLE_MB_RTU_MASTER
+
 extern mbRTU_t  mbMaster;
 extern bool     mbMaster_Coils_Buf[MB_BUF_LEN];
 extern uint16_t mbMaster_Holding_Buf[MB_BUF_LEN];
 
+void mbMaster_cmd_clr(void);
+void mbMaster_transfer_block(uint16_t ms);
 void mbMaster_Read_Coils            (uint8_t id, uint16_t addr, bool *p_data,     uint8_t cnt);
 void mbMaster_Read_Discrete_Inputs  (uint8_t id, uint16_t addr, bool *p_data,     uint8_t cnt);
 void mbMaster_Read_Holdings         (uint8_t id, uint16_t addr, uint16_t *p_data, uint8_t cnt);
@@ -123,16 +125,18 @@ void mbMaster_Write_Multiple_Coils  (uint8_t id, uint16_t addr, bool *p_data,   
 void mbMaster_Write_Multiple_Regs   (uint8_t id, uint16_t addr, uint16_t *p_data, uint8_t cnt);
 mbFxStatus_t mbMaster_Structuring_Request(void);
 mbFxStatus_t mbMaster_Processing_Response(void);
-#endif // ENABLE_MOUBUS_MASTER
+#endif // ENABLE_MB_RTU_MASTER
 
 /**
- * @brief   ENABLE_MOUBUS_SLAVE
+ * @brief   ENABLE_MB_RTU_SLAVE
 */
-#if  ENABLE_MOUBUS_SLAVE
+#if  ENABLE_MB_RTU_SLAVE
+
 extern mbRTU_t  mbSlave;
 extern bool     mbSlave_Coils_Buf[MB_BUF_LEN];
 extern uint16_t mbSlave_Holding_Buf[MB_BUF_LEN];
 
+void mbSlave_cmd_clr(void);
 void mbSlave_Read_Coils             (uint16_t addr, bool *p_data,       uint16_t cnt);
 void mbSlave_Read_Discrete_Inputs   (uint16_t addr, bool *p_data,       uint16_t cnt);
 void mbSlave_Read_Holdings          (uint16_t addr, uint16_t *p_data,   uint16_t cnt);
@@ -148,12 +152,11 @@ void mbSlave_FIFO_Write_Regs_DMA_Callback(DMA_HandleTypeDef *hdma);
 #endif // ENABLE_MOUBUS_DMACPY
 mbFxStatus_t mbSlave_Processing_Request(void);
 mbFxStatus_t mbSlave_Structuring_Response(void);
-#endif // ENABLE_MOUBUS_SLAVE
+#endif // ENABLE_MB_RTU_SLAVE
 
 /**
  * @brief       数据结构
  */
-void mbMemClr_Cmd(mbRTU_t *mb);
 void mbMemCpy_Buf(uint8_t *target, uint8_t *source, uint16_t len);
 void mbMemCpy_Coils(bool *target, bool *source, uint16_t len);
 void mbMemCpy_Regs(uint16_t *target, uint16_t *source, uint16_t len);

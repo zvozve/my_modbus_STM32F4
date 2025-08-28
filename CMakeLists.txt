@@ -43,6 +43,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 file(GLOB_RECURSE USER_SOURCES 
+    "Drivers/BSP/RTT/*.c"
     "Drivers/BSP/MODBUS/Src/*.c"
     "User/Src/*.c"
 )
@@ -50,8 +51,6 @@ file(GLOB_RECURSE USER_SOURCES
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
-    Drivers/BSP/RTT/SEGGER_RTT.c
-    Drivers/BSP/RTT/SEGGER_RTT_printf.c
     ${USER_SOURCES}
 )
 
@@ -76,4 +75,10 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 
     # Add user defined libraries
+)
+
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+    ${CMAKE_CURRENT_BINARY_DIR}/ModbusRTU.map
+    ${CMAKE_CURRENT_BINARY_DIR}/my_modbus_STM32F4_by_cmake.map
 )

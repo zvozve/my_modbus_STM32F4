@@ -22,11 +22,10 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
-#include "user_app.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "user_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -93,6 +92,7 @@ int main(void)
   MX_DMA_Init();
   MX_TIM6_Init();
   MX_USART2_UART_Init();
+  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
   app_entry();
   /* USER CODE END 2 */
