@@ -1,0 +1,525 @@
+#include "modbus_core.h"
+#include "SEGGER_RTT_Log.h"
+#include <string.h>
+#include <stdlib.h>
+
+// ===========================
+// 全局实例列表
+// ===========================
+static modbus_t *g_modbus_instances[MODBUS_MAX_INSTANCES];
+static uint8_t g_modbus_instance_count = 0;
+
+// ===========================
+// CRC16
+// ===========================
+uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
+    uint16_t crc = 0xFFFF;
+    for (uint16_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 0x0001) {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+// ===========================
+// 实例管理
+// ===========================
+void modbus_register_instance(modbus_t *ctx) {
+    if (!ctx) return;
+    if (g_modbus_instance_count >= MODBUS_MAX_INSTANCES) {
+        ERR_LOG("Modbus instance count exceeds max!");
+        return;
+    }
+    for (int i = 0; i < g_modbus_instance_count; i++) {
+        if (g_modbus_instances[i] == ctx) return;
+    }
+    g_modbus_instances[g_modbus_instance_count++] = ctx;
+    MODBUS_LOG("Registered modbus instance %d", g_modbus_instance_count);
+}
+
+void modbus_unregister_instance(modbus_t *ctx) {
+    if (!ctx) return;
+    for (int i = 0; i < g_modbus_instance_count; i++) {
+        if (g_modbus_instances[i] == ctx) {
+            for (int j = i; j < g_modbus_instance_count - 1; j++) {
+                g_modbus_instances[j] = g_modbus_instances[j + 1];
+            }
+            g_modbus_instance_count--;
+            MODBUS_LOG("Unregistered modbus instance");
+            return;
+        }
+    }
+}
+
+void modbus_process_all(void) {
+    for (int i = 0; i < g_modbus_instance_count; i++) {
+        if (g_modbus_instances[i]) {
+            modbus_process(g_modbus_instances[i]);
+        }
+    }
+}
+
+// ===========================
+// 内部函数
+// ===========================
+static uint16_t build_exception_response(uint8_t slave_addr, uint8_t func_code,
+                                          uint8_t exception_code, uint8_t *buf) {
+    buf[0] = slave_addr;
+    buf[1] = func_code | 0x80;
+    buf[2] = exception_code;
+    return 3;
+}
+
+// ===========================
+// 断线检测
+// ===========================
+static void check_line_status(modbus_t *ctx) {
+    uint32_t now = MB_GET_TICK();
+    
+    // 已断线
+    if (ctx->line_state == MODBUS_LINE_DISCONNECTED) {
+        if (ctx->role == MODBUS_ROLE_MASTER) {
+            if (now - ctx->reconnect_tick >= ctx->reconnect_interval) {
+                ctx->line_state = MODBUS_LINE_OK;
+                ctx->timeout_count = 0;
+                ctx->reconnect_tick = now;
+                MODBUS_LOG("Line recovered (reconnect)");
+                if (ctx->on_line_recover) ctx->on_line_recover(ctx);
+            }
+        }
+        return;
+    }
+    
+    // 线路正常
+    if (ctx->role == MODBUS_ROLE_MASTER) {
+        if (ctx->state == MODBUS_STATE_WAITING_RESPONSE) {
+            uint32_t elapsed = now - ctx->send_tick;
+            if (elapsed > ctx->response_timeout) {
+                ctx->timeout_count++;
+                MODBUS_LOG("Timeout %d/%d", ctx->timeout_count, ctx->max_timeout_count);
+                
+                if (ctx->timeout_count >= ctx->max_timeout_count) {
+                    ctx->line_state = MODBUS_LINE_DISCONNECTED;
+                    ctx->reconnect_tick = now;
+                    MODBUS_LOG("Line DISCONNECTED!");
+                    if (ctx->on_line_break) ctx->on_line_break(ctx);
+                    ctx->state = MODBUS_STATE_IDLE;
+                    if (ctx->transaction.pending) {
+                        ctx->transaction.pending = false;
+                        ctx->transaction.completed = true;
+                        ctx->transaction.result = -1;
+                        if (ctx->transaction.resp_len) *ctx->transaction.resp_len = 0;
+                    }
+                } else {
+                    ctx->line_state = MODBUS_LINE_TIMEOUT;
+                    if (ctx->transaction.req_data && ctx->transaction.req_len > 0) {
+                        MODBUS_LOG("Retry send...");
+                        ctx->transport.send(ctx->transport.ctx, 
+                                           ctx->transaction.req_data,
+                                           ctx->transaction.req_len);
+                        ctx->send_tick = now;
+                    }
+                }
+            }
+        }
+    } else {
+        // 从机：空闲超时
+        uint32_t elapsed = now - ctx->last_activity_tick;
+        if (elapsed > ctx->slave_timeout_ms && ctx->line_state == MODBUS_LINE_OK) {
+            ctx->line_state = MODBUS_LINE_DISCONNECTED;
+            MODBUS_LOG("Slave line DISCONNECTED (idle %lu ms)", elapsed);
+            if (ctx->on_line_break) ctx->on_line_break(ctx);
+        }
+    }
+}
+
+// ===========================
+// 从机请求处理（由modbus_process调用）
+// ===========================
+static void process_slave_request(modbus_t *ctx) {
+    uint8_t addr = ctx->rx_buf[0];
+    uint8_t func = ctx->rx_buf[1];
+    bool is_broadcast = (addr == MODBUS_BROADCAST_ADDR);
+    uint16_t resp_len = 0;
+    uint8_t exception = 0;
+    
+    MODBUS_LOG("Slave recv: addr=0x%02X func=0x%02X", addr, func);
+    HEX_LOG("RX: ", ctx->rx_buf, ctx->rx_len);
+    
+    // 功能码分发（只实现核心功能，具体实现在slave模块中）
+    // 这里由外部注册的处理函数处理
+    // 简化版本：直接处理
+    switch(func) {
+        case MODBUS_FC_READ_COILS: {
+            uint16_t start_addr = (ctx->rx_buf[2] << 8) | ctx->rx_buf[3];
+            uint16_t count = (ctx->rx_buf[4] << 8) | ctx->rx_buf[5];
+            
+            SYS_LOG("[SLAVE] READ_COILS: start=%d, count=%d, coils=%p, size=%d", 
+            start_addr, count, ctx->data_map.coils, ctx->data_map.coils_size);
+            
+            if (count < 1 || count > 2000) {
+                exception = MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE;
+                break;
+            }
+            if (!ctx->data_map.coils || start_addr + count > ctx->data_map.coils_size * 8) {
+                exception = MODBUS_EXCEPTION_ILLEGAL_DATA_ADDR;
+                break;
+            }
+            
+            ctx->tx_buf[0] = addr;
+            ctx->tx_buf[1] = func;
+            uint8_t byte_count = (count + 7) / 8;
+            ctx->tx_buf[2] = byte_count;
+            memset(ctx->tx_buf + 3, 0, byte_count);
+            
+            for (uint16_t i = 0; i < count; i++) {
+                uint16_t bit_addr = start_addr + i;
+                uint8_t byte_idx = bit_addr / 8;
+                uint8_t bit_idx = bit_addr % 8;
+                if (ctx->data_map.coils[byte_idx] & (1 << bit_idx)) {
+                    ctx->tx_buf[3 + (i / 8)] |= (1 << (i % 8));
+                }
+            }
+            resp_len = 3 + byte_count;
+            break;
+        }
+        
+        case MODBUS_FC_READ_HOLDING_REGS: {
+            uint16_t start_addr = (ctx->rx_buf[2] << 8) | ctx->rx_buf[3];
+            uint16_t count = (ctx->rx_buf[4] << 8) | ctx->rx_buf[5];
+            
+            if (count < 1 || count > 125) {
+                exception = MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE;
+                break;
+            }
+            if (!ctx->data_map.holding_regs || start_addr + count > ctx->data_map.holding_size) {
+                exception = MODBUS_EXCEPTION_ILLEGAL_DATA_ADDR;
+                break;
+            }
+            
+            ctx->tx_buf[0] = addr;
+            ctx->tx_buf[1] = func;
+            ctx->tx_buf[2] = count * 2;
+            for (uint16_t i = 0; i < count; i++) {
+                uint16_t val = ctx->data_map.holding_regs[start_addr + i];
+                ctx->tx_buf[3 + i * 2] = (val >> 8) & 0xFF;
+                ctx->tx_buf[3 + i * 2 + 1] = val & 0xFF;
+            }
+            resp_len = 3 + count * 2;
+            break;
+        }
+        
+        case MODBUS_FC_WRITE_SINGLE_COIL: {
+            uint16_t addr_w = (ctx->rx_buf[2] << 8) | ctx->rx_buf[3];
+            uint16_t value = (ctx->rx_buf[4] << 8) | ctx->rx_buf[5];
+            
+            if (!ctx->data_map.coils || addr_w >= ctx->data_map.coils_size * 8) {
+                exception = MODBUS_EXCEPTION_ILLEGAL_DATA_ADDR;
+                break;
+            }
+            if (value != 0x0000 && value != 0xFF00) {
+                exception = MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE;
+                break;
+            }
+            
+            uint16_t old_val = ctx->data_map.coils[addr_w / 8];
+            bool old_bit = (old_val >> (addr_w % 8)) & 0x01;
+            bool new_bit = (value == 0xFF00);
+            
+            if (new_bit) {
+                ctx->data_map.coils[addr_w / 8] |= (1 << (addr_w % 8));
+            } else {
+                ctx->data_map.coils[addr_w / 8] &= ~(1 << (addr_w % 8));
+            }
+            
+            // 触发从机变化回调
+            if (old_bit != new_bit && ctx->on_master_coil_change) {
+                ctx->on_master_coil_change(addr_w, old_bit, new_bit);
+            }
+            
+            if (!is_broadcast) {
+                memcpy(ctx->tx_buf, ctx->rx_buf, 6);
+                resp_len = 6;
+            }
+            break;
+        }
+        
+        case MODBUS_FC_WRITE_SINGLE_REG: {
+            uint16_t addr_w = (ctx->rx_buf[2] << 8) | ctx->rx_buf[3];
+            uint16_t value = (ctx->rx_buf[4] << 8) | ctx->rx_buf[5];
+            
+            if (!ctx->data_map.holding_regs || addr_w >= ctx->data_map.holding_size) {
+                exception = MODBUS_EXCEPTION_ILLEGAL_DATA_ADDR;
+                break;
+            }
+            
+            uint16_t old_val = ctx->data_map.holding_regs[addr_w];
+            ctx->data_map.holding_regs[addr_w] = value;
+            
+            if (old_val != value && ctx->on_master_reg_change) {
+                ctx->on_master_reg_change(addr_w, old_val, value);
+            }
+            
+            if (!is_broadcast) {
+                memcpy(ctx->tx_buf, ctx->rx_buf, 6);
+                resp_len = 6;
+            }
+            break;
+        }
+        
+        case MODBUS_FC_WRITE_MULTIPLE_REGS: {
+            uint16_t start_addr = (ctx->rx_buf[2] << 8) | ctx->rx_buf[3];
+            uint16_t count = (ctx->rx_buf[4] << 8) | ctx->rx_buf[5];
+            uint8_t byte_count = ctx->rx_buf[6];
+            
+            if (!ctx->data_map.holding_regs || start_addr + count > ctx->data_map.holding_size) {
+                exception = MODBUS_EXCEPTION_ILLEGAL_DATA_ADDR;
+                break;
+            }
+            if (byte_count != count * 2) {
+                exception = MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE;
+                break;
+            }
+            
+            for (uint16_t i = 0; i < count; i++) {
+                uint16_t val = (ctx->rx_buf[7 + i * 2] << 8) | ctx->rx_buf[7 + i * 2 + 1];
+                uint16_t old_val = ctx->data_map.holding_regs[start_addr + i];
+                ctx->data_map.holding_regs[start_addr + i] = val;
+                if (old_val != val && ctx->on_master_reg_change) {
+                    ctx->on_master_reg_change(start_addr + i, old_val, val);
+                }
+            }
+            
+            if (!is_broadcast) {
+                ctx->tx_buf[0] = addr;
+                ctx->tx_buf[1] = func;
+                ctx->tx_buf[2] = ctx->rx_buf[2];
+                ctx->tx_buf[3] = ctx->rx_buf[3];
+                ctx->tx_buf[4] = ctx->rx_buf[4];
+                ctx->tx_buf[5] = ctx->rx_buf[5];
+                resp_len = 6;
+            }
+            break;
+        }
+        
+        default:
+            exception = MODBUS_EXCEPTION_ILLEGAL_FUNCTION;
+            break;
+    }
+    
+    if (exception != 0) {
+        MODBUS_LOG("Slave exception: 0x%02X", exception);
+        if (!is_broadcast) {
+            resp_len = build_exception_response(addr, func, exception, ctx->tx_buf);
+        }
+    }
+    
+    if (!is_broadcast && resp_len > 0) {
+        uint16_t crc = modbus_crc16(ctx->tx_buf, resp_len);
+        ctx->tx_buf[resp_len] = crc & 0xFF;
+        ctx->tx_buf[resp_len + 1] = (crc >> 8) & 0xFF;
+        resp_len += 2;
+        MODBUS_LOG("Slave response len=%d", resp_len);
+        HEX_LOG("TX: ", ctx->tx_buf, resp_len);
+        ctx->transport.send(ctx->transport.ctx, ctx->tx_buf, resp_len);
+        ctx->state = MODBUS_STATE_SENDING;
+    }
+}
+
+// ===========================
+// modbus_process - 核心主循环
+// ===========================
+void modbus_process(modbus_t *ctx) {
+    if (!ctx) return;
+    if (!ctx->transport.get_tick) return;
+    
+    uint32_t now = ctx->transport.get_tick();
+    
+    // 断线检测
+    check_line_status(ctx);
+    
+    // 主机轮询（只在 IDLE 状态发起新请求）
+    if (ctx->role == MODBUS_ROLE_MASTER && ctx->poll_callback) {
+        if (ctx->state == MODBUS_STATE_IDLE) {
+            if (now - ctx->last_poll_tick >= ctx->poll_interval) {
+                ctx->last_poll_tick = now;
+                ctx->poll_callback(ctx);
+            }
+        }
+    }
+    
+    // 检查接收数据
+    uint16_t available = ctx->transport.peek(ctx->transport.ctx);
+    if (available > 0) {
+        uint16_t read_len = ctx->transport.recv(ctx->transport.ctx, 
+                                                 ctx->rx_buf,
+                                                 MODBUS_RTU_BUF_SIZE);
+        if (read_len > 0) {
+            ctx->rx_len = read_len;
+            ctx->last_activity_tick = now;
+            
+            if (ctx->role == MODBUS_ROLE_SLAVE && ctx->line_state == MODBUS_LINE_DISCONNECTED) {
+                ctx->line_state = MODBUS_LINE_OK;
+                MODBUS_LOG("Slave line recovered (data received)");
+                if (ctx->on_line_recover) ctx->on_line_recover(ctx);
+            }
+            
+            if (ctx->line_state == MODBUS_LINE_DISCONNECTED) {
+                ctx->line_state = MODBUS_LINE_OK;
+                MODBUS_LOG("Line recovered");
+                if (ctx->on_line_recover) ctx->on_line_recover(ctx);
+            }
+            
+            MODBUS_LOG("Received %d bytes", ctx->rx_len);
+            HEX_LOG("RX: ", ctx->rx_buf, ctx->rx_len);
+            
+            if (ctx->role == MODBUS_ROLE_MASTER) {
+                if (ctx->state == MODBUS_STATE_WAITING_RESPONSE && ctx->rx_len >= 4) {
+                    uint16_t crc_calc = modbus_crc16(ctx->rx_buf, ctx->rx_len - 2);
+                    uint16_t crc_recv = ctx->rx_buf[ctx->rx_len - 2] | 
+                                       (ctx->rx_buf[ctx->rx_len - 1] << 8);
+                    
+                    if (crc_calc == crc_recv) {
+                        MODBUS_LOG("Master recv valid response");
+                        if (ctx->rx_buf[1] & 0x80) {
+                            MODBUS_LOG("Exception: 0x%02X", ctx->rx_buf[2]);
+                            ctx->state = MODBUS_STATE_IDLE;
+                            ctx->transaction.pending = false;
+                            ctx->transaction.completed = true;
+                            ctx->transaction.result = -2;
+                            if (ctx->transaction.resp_len) *ctx->transaction.resp_len = 0;
+                        } else {
+                            ctx->state = MODBUS_STATE_IDLE;
+                            ctx->timeout_count = 0;
+                            if (ctx->transaction.resp_data && ctx->transaction.resp_len) {
+                                uint16_t data_len = ctx->rx_len;
+                                if (data_len > *ctx->transaction.resp_len) {
+                                    data_len = *ctx->transaction.resp_len;
+                                }
+                                memcpy(ctx->transaction.resp_data, ctx->rx_buf, data_len);
+                                *ctx->transaction.resp_len = data_len;
+                            }
+                            ctx->transaction.pending = false;
+                            ctx->transaction.completed = true;
+                            ctx->transaction.result = 0;
+                        }
+                    } else {
+                        MODBUS_LOG("CRC error");
+                    }
+                    ctx->rx_len = 0;
+                }
+            } else {
+                if (ctx->rx_len >= 4) {
+                    uint8_t addr = ctx->rx_buf[0];
+                    if (addr == ctx->slave_addr || addr == MODBUS_BROADCAST_ADDR) {
+                        uint16_t crc_calc = modbus_crc16(ctx->rx_buf, ctx->rx_len - 2);
+                        uint16_t crc_recv = ctx->rx_buf[ctx->rx_len - 2] | 
+                                           (ctx->rx_buf[ctx->rx_len - 1] << 8);
+                        if (crc_calc == crc_recv) {
+                            ctx->state = MODBUS_STATE_PROCESSING;
+                            process_slave_request(ctx);
+                        } else {
+                            MODBUS_LOG("CRC error");
+                        }
+                    } else {
+                        MODBUS_LOG("Addr mismatch: 0x%02X != 0x%02X", addr, ctx->slave_addr);
+                    }
+                    ctx->rx_len = 0;
+                }
+            }
+        }
+    }
+}
+
+// ===========================
+// 核心API实现
+// ===========================
+void modbus_init(modbus_t *ctx) {
+    memset(ctx, 0, sizeof(modbus_t));
+    ctx->slave_addr = 1;
+    ctx->role = MODBUS_ROLE_SLAVE;
+    ctx->mode = MODBUS_MODE_RTU;
+    ctx->state = MODBUS_STATE_IDLE;
+    ctx->line_state = MODBUS_LINE_OK;
+    ctx->response_timeout = 1000;
+    ctx->slave_timeout_ms = 5000;
+    ctx->max_timeout_count = 3;
+    ctx->poll_interval = 100;
+    ctx->reconnect_interval = 10000;
+    ctx->last_poll_tick = 0;
+    ctx->timeout_count = 0;
+    ctx->reconnect_tick = 0;
+    ctx->on_line_break = NULL;
+    ctx->on_line_recover = NULL;
+    if (ctx->transport.get_tick) {
+        ctx->last_activity_tick = ctx->transport.get_tick();
+    }
+    modbus_register_instance(ctx);
+    MODBUS_LOG("Modbus instance initialized");
+}
+
+void modbus_set_transport(modbus_t *ctx, const modbus_transport_t *transport) {
+    if (ctx && transport) {
+        memcpy(&ctx->transport, transport, sizeof(modbus_transport_t));
+        MODBUS_LOG("Transport set");
+    }
+}
+
+void modbus_set_role(modbus_t *ctx, modbus_role_t role) {
+    if (ctx) {
+        ctx->role = role;
+        MODBUS_LOG("Set role: %s", role == MODBUS_ROLE_MASTER ? "MASTER" : "SLAVE");
+    }
+}
+
+void modbus_set_slave_addr(modbus_t *ctx, uint8_t addr) {
+    if (ctx) {
+        ctx->slave_addr = addr;
+        MODBUS_LOG("Set slave address: 0x%02X", addr);
+    }
+}
+
+void modbus_set_timeouts(modbus_t *ctx, uint32_t response_timeout_ms, 
+                         uint32_t slave_timeout_ms, uint8_t max_retries) {
+    if (ctx) {
+        ctx->response_timeout = response_timeout_ms;
+        ctx->slave_timeout_ms = slave_timeout_ms;
+        ctx->max_timeout_count = max_retries;
+        MODBUS_LOG("Timeouts: resp=%lu, slave=%lu, retries=%d", 
+                   response_timeout_ms, slave_timeout_ms, max_retries);
+    }
+}
+
+void modbus_set_reconnect_interval(modbus_t *ctx, uint32_t interval_ms) {
+    if (ctx) {
+        ctx->reconnect_interval = interval_ms > 0 ? interval_ms : 10000;
+        MODBUS_LOG("Reconnect interval: %lu ms", ctx->reconnect_interval);
+    }
+}
+
+void modbus_set_line_callbacks(modbus_t *ctx, 
+    void (*on_break)(modbus_t *), void (*on_recover)(modbus_t *)) {
+    if (ctx) {
+        ctx->on_line_break = on_break;
+        ctx->on_line_recover = on_recover;
+        MODBUS_LOG("Line callbacks set");
+    }
+}
+
+modbus_state_t modbus_get_state(modbus_t *ctx) {
+    return ctx ? ctx->state : MODBUS_STATE_ERROR;
+}
+
+modbus_line_state_t modbus_get_line_state(modbus_t *ctx) {
+    return ctx ? ctx->line_state : MODBUS_LINE_DISCONNECTED;
+}
+
+uint32_t modbus_get_last_activity(modbus_t *ctx) {
+    return ctx ? ctx->last_activity_tick : 0;
+}

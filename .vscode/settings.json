@@ -1,0 +1,28 @@
+{
+    "cmake.cmakePath": "cube-cmake",
+    "cmake.configureArgs": [
+        "-DCMAKE_COMMAND=cube-cmake"
+    ],
+    "cmake.preferredGenerators": [
+        "Ninja"
+    ],
+    "cmake.options.advanced": {
+        "debug": {
+            "visibility": "hidden"
+        },
+        "launch": {
+            "visibility": "hidden"
+        }
+    },
+    "jlink.root": "C:/Program Files/SEGGER/JLink_V798b",
+    "jlink.device": "STM32F407ZG",
+    "jlink.interface": "swd",
+    "jlink.speed": "4000",
+    "jlink.svdFile": "${workspaceFolder}/.vscode/STM32F407.svd",
+    "stm32cube-ide-clangd.path": "cube",
+    "stm32cube-ide-clangd.arguments": [
+        "starm-clangd",
+        "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/13.3.1+st.9/bin/arm-none-eabi-gcc*",
+        "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/13.3.1+st.9/bin/arm-none-eabi-g++*"
+    ]
+}
