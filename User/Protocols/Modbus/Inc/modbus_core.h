@@ -25,8 +25,7 @@ extern "C" {
     #define MB_GET_TICK()      xTaskGetTickCount()
     #define MB_Delay_ms(ms)    vTaskDelay(pdMS_TO_TICKS(ms))
 #else
-    // #include "stm32f4xx_hal.h"
-    #include "stm32g4xx_hal.h"
+    #include "stm32f4xx_hal.h"
     #define MB_GET_TICK()      HAL_GetTick()
     #define MB_Delay_ms(ms)    HAL_Delay(ms)
 #endif

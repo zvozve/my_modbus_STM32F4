@@ -1,6 +1,6 @@
 #include "bsp_uart_drv.h"
 #include "usart.h"
-#include "stm32g4xx_hal_uart_ex.h"   /* HAL_UARTEx_GetRxEventType */
+// #include "stm32g4xx_hal_uart_ex.h"   /* HAL_UARTEx_GetRxEventType */
 #include "SEGGER_RTT_Log.h"
 #include <string.h>
 
