@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define MB_RTU_DRVIER_VERSION "4.0.1"
+#define MB_RTU_DRVIER_VERSION "5.0.1"
 #define MB_RTU_DRVIER_DATE "2026-08-14"
 
 // ===========================
