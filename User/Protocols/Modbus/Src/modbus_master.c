@@ -68,9 +68,26 @@ static void master_poll_task(modbus_t *ctx) {
     static poll_state_t poll_state = POLL_STATE_REG;
     int ret;
     
+    // ★★★ 在开头统一处理状态切换 ★★★
+    bool reg_enabled = (ctx->data_map.holding_regs && ctx->last_regs && ctx->last_regs_count > 0);
+    bool coil_enabled = (ctx->data_map.coils && ctx->last_coils && ctx->last_coils_count > 0);
+    
+    // ★★★ 如果都没注册，直接返回 ★★★
+    if (!reg_enabled && !coil_enabled) {
+        return;
+    }
+    
+    // ★★★ 如果当前状态对应的类型未注册，切换到另一个已注册的类型 ★★★
+    if (poll_state == POLL_STATE_REG && !reg_enabled) {
+        poll_state = POLL_STATE_COIL;  // 此时 coil_enabled 必然为 true
+    } else if (poll_state == POLL_STATE_COIL && !coil_enabled) {
+        poll_state = POLL_STATE_REG;   // 此时 reg_enabled 必然为 true
+    }
+    
+    // 执行读取
     switch (poll_state) {
         case POLL_STATE_REG:
-            if (ctx->data_map.holding_regs && ctx->last_regs && ctx->last_regs_count > 0) {
+            if (reg_enabled) {
                 uint8_t req_data[4];
                 req_data[0] = (ctx->last_regs_start_addr >> 8) & 0xFF;
                 req_data[1] = ctx->last_regs_start_addr & 0xFF;
@@ -91,15 +108,10 @@ static void master_poll_task(modbus_t *ctx) {
                     }
                 }
             }
-            // ★★★ 只有配置了线圈才切换到 COIL ★★★
-            if (ctx->data_map.coils && ctx->last_coils && ctx->last_coils_count > 0) {
-                poll_state = POLL_STATE_COIL;
-            }
-            // 否则保持 REG，下次继续读寄存器
             break;
             
         case POLL_STATE_COIL:
-            if (ctx->data_map.coils && ctx->last_coils && ctx->last_coils_count > 0) {
+            if (coil_enabled) {
                 uint8_t req_data[4];
                 req_data[0] = (ctx->last_coils_start_addr >> 8) & 0xFF;
                 req_data[1] = ctx->last_coils_start_addr & 0xFF;
@@ -127,13 +139,19 @@ static void master_poll_task(modbus_t *ctx) {
                     }
                 }
             }
-            poll_state = POLL_STATE_REG;
             break;
             
         default:
             poll_state = POLL_STATE_REG;
             break;
     }
+    
+    // ★★★ 在结尾切换状态 ★★★
+    if (reg_enabled && coil_enabled) {
+        // 两种都注册了：交替切换
+        poll_state = (poll_state == POLL_STATE_REG) ? POLL_STATE_COIL : POLL_STATE_REG;
+    }
+    // 如果只有一种注册了，poll_state 保持不变，下次继续读同一个
 }
 
 // ===========================
@@ -141,7 +159,7 @@ static void master_poll_task(modbus_t *ctx) {
 // ===========================
 void modbus_master_init(modbus_t *ctx, const modbus_master_config_t *cfg) {
     if (!ctx || !cfg) return;
-    
+
     modbus_init(ctx);
     modbus_set_role(ctx, MODBUS_ROLE_MASTER);
     modbus_set_slave_addr(ctx, cfg->target_slave_addr);

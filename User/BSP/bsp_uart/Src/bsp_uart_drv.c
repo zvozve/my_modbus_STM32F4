@@ -1,5 +1,6 @@
 #include "bsp_uart_drv.h"
 #include "usart.h"
+#include "stm32g4xx_hal_uart_ex.h"   /* HAL_UARTEx_GetRxEventType */
 #include "SEGGER_RTT_Log.h"
 #include <string.h>
 
@@ -73,7 +74,7 @@ static void rs485_tx_enable(uart_drv_t *drv) {
 
 static void rs485_rx_enable(uart_drv_t *drv) {
     if (drv->rs485 == NULL) return;
-    while (!__HAL_UART_GET_FLAG(drv->huart, UART_FLAG_TC)) {};
+    // while (!__HAL_UART_GET_FLAG(drv->huart, UART_FLAG_TC)) {};
     HAL_GPIO_WritePin(drv->rs485->port, drv->rs485->pin,
                       drv->rs485->active_level ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
@@ -94,8 +95,8 @@ static void start_rx(uart_drv_t *drv) {
     if (drv->huart->hdmarx != NULL) {
         HAL_UARTEx_ReceiveToIdle_DMA(drv->huart, drv->rx_buf, UART_DRV_BUF_SIZE);
     } else {
-        HAL_UART_Receive_IT(drv->huart, drv->rx_buf, UART_DRV_BUF_SIZE);
-    }
+        // HAL_UART_Receive_IT(drv->huart, drv->rx_buf, UART_DRV_BUF_SIZE);
+    }    
 }
 
 // ===========================
@@ -157,9 +158,12 @@ void uart_drv_reg_cb(uart_drv_t *drv,
                      void (*on_recv)(uart_drv_t *, uint8_t *, uint16_t),
                      void (*on_sent)(uart_drv_t *),
                      void (*on_error)(uart_drv_t *)) {
-    drv->on_recv = on_recv;
-    drv->on_sent = on_sent;
-    drv->on_error = on_error;
+    if (on_recv)
+        drv->on_recv = on_recv;
+    if (on_sent)
+        drv->on_sent = on_sent;
+    if (on_error)
+        drv->on_error = on_error;
 }
 
 int uart_drv_send(uart_drv_t *drv, const uint8_t *data, uint16_t len) {
@@ -278,7 +282,20 @@ void uart_drv_on_idle(UART_HandleTypeDef *huart) {
         __HAL_UART_CLEAR_IDLEFLAG(huart);
         return;
     }
-    
+
+    /* ★★★ 关键修复：HAL 的 ReceiveToIdle_DMA 在 DMA 半传输(HT, 128字节) 和
+     *     全传输(TC, 256字节) 时也会回调本函数，而不只是 IDLE（帧结束）。
+     *     若把 HT 误判为帧结束，会把 >128 字节的大帧从中间截断 → CRC 错误。
+     *     因此只有在真正的 IDLE（或恰好填满缓冲区的 TC）时才提交数据包。★★★ */
+    {
+        HAL_UART_RxEventTypeTypeDef rx_evt = HAL_UARTEx_GetRxEventType(huart);
+        if (rx_evt != HAL_UART_RXEVENT_IDLE && rx_evt != HAL_UART_RXEVENT_TC) {
+            /* HT 等中间事件：不要停止 DMA，也不要提交数据包，等真正的帧结束 */
+            __HAL_UART_CLEAR_IDLEFLAG(huart);
+            return;
+        }
+    }
+
     if (drv->huart->hdmarx != NULL) {
         drv->rx_len = UART_DRV_BUF_SIZE - __HAL_DMA_GET_COUNTER(drv->huart->hdmarx);
     }
