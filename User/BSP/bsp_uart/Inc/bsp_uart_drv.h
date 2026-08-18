@@ -25,7 +25,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "stm32f4xx_hal.h"
+#include "hal_platform.h"   /* STM32 系列 HAL 统一入口（移植层） */
 
 #ifdef __cplusplus
 extern "C" {

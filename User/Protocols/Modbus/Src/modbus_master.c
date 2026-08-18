@@ -2,14 +2,15 @@
 #include "SEGGER_RTT_Log.h"
 #include <string.h>
 
-// ===========================
-// 内部：主机请求
-// ===========================
+/* ===========================
+ * 内部：主机请求（唯一发送入口）
+ * =========================== */
 // master_request_async 改成非阻塞
 static int master_request_async(modbus_t *ctx, uint8_t func_code,
                                     const uint8_t *req_data, uint16_t req_len,
                                     uint8_t *resp_buf, uint16_t *resp_len,
                                     uint32_t timeout_ms) {
+    (void)timeout_ms;   /* 超时统一由 check_line_status 按 ctx->response_timeout 处理 */
     if (!ctx || ctx->role != MODBUS_ROLE_MASTER) return -1;
     if (ctx->state == MODBUS_STATE_WAITING_RESPONSE) return -2;
     if (ctx->line_state == MODBUS_LINE_DISCONNECTED) return -3;
@@ -32,10 +33,11 @@ static int master_request_async(modbus_t *ctx, uint8_t func_code,
     ctx->transaction.req_len = ctx->tx_len;
     ctx->transaction.resp_data = resp_buf;
     ctx->transaction.resp_len = resp_len;
+    ctx->transaction.func_code = func_code;
     ctx->transaction.pending = true;
     ctx->transaction.completed = false;
     ctx->transaction.result = -1;
-    *resp_len = 0;
+    if (resp_len) *resp_len = 0;
     
     int ret = ctx->transport.send(ctx->transport.ctx, ctx->tx_buf, ctx->tx_len);
     if (ret != 0) {
@@ -44,7 +46,7 @@ static int master_request_async(modbus_t *ctx, uint8_t func_code,
     }
     
     ctx->state = MODBUS_STATE_WAITING_RESPONSE;
-    SYS_LOG("[MASTER] state set to WAITING_RESPONSE");
+    MODBUS_LOG("[MASTER] state set to WAITING_RESPONSE");
     ctx->send_tick = ctx->transport.get_tick();
     ctx->timeout_count = 0;
     
@@ -52,111 +54,409 @@ static int master_request_async(modbus_t *ctx, uint8_t func_code,
     return 0;
 }
 
-// ===========================
-// 内部：轮询状态机
-// ===========================
-typedef enum {
-    POLL_STATE_REG = 0,
-    POLL_STATE_COIL,
-    POLL_STATE_DONE
-} poll_state_t;
+/* ===========================
+ * 统一总线仲裁器（2026-08-18）
+ *
+ * 所有发往总线的帧都是作业：周期读段（多段寄存器/线圈）、一次性写、
+ * 一次性读。调度每 tick 从高优先级向低优先级挑一帧：
+ *   1. 防饿死提升：周期读错过最后期限（等待 > 2×period）→ 无条件先发
+ *   2. 高优一次性作业：写 → 手动读（FIFO）
+ *   3. 周期读：最早到期（EDF）
+ * 帧节拍由 min_frame_gap_ms 全局约束（默认 = poll_interval = 100ms，
+ * 即"查询指令 100ms 一条"）。应答由 modbus_core 解析出后回调
+ * mb_on_master_response，按 transaction.job 路由到各作业。
+ * =========================== */
+#define MB_POLL_REG_MAX    8
+#define MB_POLL_COIL_MAX   4
+#define MB_WRITE_JOB_MAX   12   /* >= boot-push 一次性入队数（5 块+4 线圈=9）+ DOP107 并发帧 */
+#define MB_READ_ONCE_MAX   4
 
-static void master_poll_task(modbus_t *ctx) {
-    if (!ctx) return;
-    if (ctx->state == MODBUS_STATE_WAITING_RESPONSE) return;
-    
-    static poll_state_t poll_state = POLL_STATE_REG;
-    int ret;
-    
-    // ★★★ 在开头统一处理状态切换 ★★★
-    bool reg_enabled = (ctx->data_map.holding_regs && ctx->last_regs && ctx->last_regs_count > 0);
-    bool coil_enabled = (ctx->data_map.coils && ctx->last_coils && ctx->last_coils_count > 0);
-    
-    // ★★★ 如果都没注册，直接返回 ★★★
-    if (!reg_enabled && !coil_enabled) {
-        return;
-    }
-    
-    // ★★★ 如果当前状态对应的类型未注册，切换到另一个已注册的类型 ★★★
-    if (poll_state == POLL_STATE_REG && !reg_enabled) {
-        poll_state = POLL_STATE_COIL;  // 此时 coil_enabled 必然为 true
-    } else if (poll_state == POLL_STATE_COIL && !coil_enabled) {
-        poll_state = POLL_STATE_REG;   // 此时 reg_enabled 必然为 true
-    }
-    
-    // 执行读取
-    switch (poll_state) {
-        case POLL_STATE_REG:
-            if (reg_enabled) {
-                uint8_t req_data[4];
-                req_data[0] = (ctx->last_regs_start_addr >> 8) & 0xFF;
-                req_data[1] = ctx->last_regs_start_addr & 0xFF;
-                req_data[2] = (ctx->last_regs_count >> 8) & 0xFF;
-                req_data[3] = ctx->last_regs_count & 0xFF;
-                
-                uint16_t len = ctx->last_regs_count * 2;
-                ret = master_request_async(ctx, MODBUS_FC_READ_HOLDING_REGS,
-                                              req_data, 4, (uint8_t*)ctx->data_map.holding_regs, &len,
-                                              ctx->response_timeout);
-                if (ret == 0 && ctx->on_master_reg_change) {
-                    for (uint16_t i = 0; i < ctx->last_regs_count; i++) {
-                        if (ctx->data_map.holding_regs[i] != ctx->last_regs[i]) {
-                            ctx->on_master_reg_change(i, ctx->last_regs[i], 
-                                                       ctx->data_map.holding_regs[i]);
-                            ctx->last_regs[i] = ctx->data_map.holding_regs[i];
-                        }
-                    }
-                }
-            }
-            break;
-            
-        case POLL_STATE_COIL:
-            if (coil_enabled) {
-                uint8_t req_data[4];
-                req_data[0] = (ctx->last_coils_start_addr >> 8) & 0xFF;
-                req_data[1] = ctx->last_coils_start_addr & 0xFF;
-                req_data[2] = (ctx->last_coils_count >> 8) & 0xFF;
-                req_data[3] = ctx->last_coils_count & 0xFF;
-                
-                uint16_t len = (ctx->last_coils_count + 7) / 8;
-                ret = master_request_async(ctx, MODBUS_FC_READ_COILS,
-                                              req_data, 4, ctx->data_map.coils, &len,
-                                              ctx->response_timeout);
-                if (ret == 0 && ctx->on_master_coil_change) {
-                    for (uint16_t i = 0; i < ctx->last_coils_count; i++) {
-                        uint8_t byte_idx = i / 8;
-                        uint8_t bit_idx = i % 8;
-                        bool new_val = (ctx->data_map.coils[byte_idx] >> bit_idx) & 0x01;
-                        bool old_val = (ctx->last_coils[byte_idx] >> bit_idx) & 0x01;
-                        if (new_val != old_val) {
-                            ctx->on_master_coil_change(i, old_val, new_val);
-                            if (new_val) {
-                                ctx->last_coils[byte_idx] |= (1 << bit_idx);
-                            } else {
-                                ctx->last_coils[byte_idx] &= ~(1 << bit_idx);
-                            }
-                        }
-                    }
-                }
-            }
-            break;
-            
-        default:
-            poll_state = POLL_STATE_REG;
-            break;
-    }
-    
-    // ★★★ 在结尾切换状态 ★★★
-    if (reg_enabled && coil_enabled) {
-        // 两种都注册了：交替切换
-        poll_state = (poll_state == POLL_STATE_REG) ? POLL_STATE_COIL : POLL_STATE_REG;
-    }
-    // 如果只有一种注册了，poll_state 保持不变，下次继续读同一个
+typedef enum {
+    MB_JOB_NONE = 0,
+    MB_JOB_WRITE,
+    MB_JOB_READ_ONCE,
+    MB_JOB_REG_RANGE,
+    MB_JOB_COIL_RANGE,
+} mb_job_kind_t;
+
+/* 在途作业引用：调度时挂到 ctx->transaction.job，应答时按此路由 */
+typedef struct {
+    uint8_t kind;
+    void *ptr;
+} mb_job_ref_t;
+
+/* 周期读段：一段寄存器 / 一段线圈 */
+typedef struct {
+    uint16_t start, count;
+    uint16_t *shadow;          /* 回读镜像（同时为最近值 + 变更基准），下标相对 start */
+    uint16_t shadow_cap;
+    uint32_t period_ms, phase_ms;
+    uint32_t next_due;
+    bool baseline_done;
+    bool in_use;
+} mb_reg_range_t;
+
+typedef struct {
+    uint16_t start, count;
+    uint8_t *shadow;           /* 位镜像（字节） */
+    uint16_t shadow_cap;
+    uint32_t period_ms, phase_ms;
+    uint32_t next_due;
+    bool baseline_done;
+    bool in_use;
+} mb_coil_range_t;
+
+/* 一次性写作业 */
+typedef struct {
+    uint8_t func;              /* 06 / 10 / 05 */
+    uint16_t addr, count;
+    union {
+        uint16_t value;        /* 单寄存器/线圈 */
+        const uint16_t *regs;  /* 多寄存器：调用方持有，done 回调前必须保持有效 */
+    } data;
+    bool in_use;
+    mb_job_done_t done;
+} mb_write_job_t;
+
+/* 一次性读作业（未注册地址也可读） */
+typedef struct {
+    uint8_t func;              /* 03 / 01 */
+    uint16_t addr, count;
+    void *buf;                 /* 调用方缓冲（寄存器=words 数组，线圈=字节数组） */
+    uint16_t buf_cap;
+    bool in_use;
+    mb_job_done_t done;
+} mb_read_once_t;
+
+typedef struct {
+    mb_reg_range_t  regs[MB_POLL_REG_MAX];
+    mb_coil_range_t coils[MB_POLL_COIL_MAX];
+    mb_write_job_t  writes[MB_WRITE_JOB_MAX];
+    mb_read_once_t  reads[MB_READ_ONCE_MAX];
+    mb_job_ref_t    cur;               /* 当前在途作业引用 */
+    uint32_t min_frame_gap_ms;
+    uint32_t last_send_tick;
+} mb_arbiter_t;
+
+/* 本工程单主机：静态分配（多主机场景需改为按 ctx 分配） */
+static mb_arbiter_t g_arbiter;
+
+static mb_arbiter_t *mb_get_arbiter(modbus_t *ctx) {
+    return (ctx && ctx->master_priv) ? (mb_arbiter_t *)ctx->master_priv : NULL;
 }
 
-// ===========================
-// 主机初始化
-// ===========================
+/* ===========================
+ * 应答数据落地（按作业类型）
+ * =========================== */
+
+/* 寄存器段：大端字节序逐寄存器拼装，首帧做基线、之后逐字比对触发变更回调 */
+static void mb_fill_reg_range(modbus_t *ctx, mb_reg_range_t *r) {
+    if (ctx->rx_len < 3) return;
+    uint16_t n = ctx->rx_buf[2];
+    uint16_t cnt = n / 2;
+    if (cnt > r->count) cnt = r->count;
+    if (cnt > r->shadow_cap) cnt = r->shadow_cap;
+    if (cnt == 0) return;
+
+    if (!r->baseline_done) {
+        for (uint16_t i = 0; i < cnt; i++) {
+            r->shadow[i] = (uint16_t)((ctx->rx_buf[3 + i * 2] << 8) |
+                                      ctx->rx_buf[3 + i * 2 + 1]);
+        }
+        r->baseline_done = true;
+        return;
+    }
+    if (!ctx->on_master_reg_change) {
+        for (uint16_t i = 0; i < cnt; i++) {
+            r->shadow[i] = (uint16_t)((ctx->rx_buf[3 + i * 2] << 8) |
+                                      ctx->rx_buf[3 + i * 2 + 1]);
+        }
+        return;
+    }
+    for (uint16_t i = 0; i < cnt; i++) {
+        uint16_t nv = (uint16_t)((ctx->rx_buf[3 + i * 2] << 8) |
+                                 ctx->rx_buf[3 + i * 2 + 1]);
+        if (nv != r->shadow[i]) {
+            ctx->on_master_reg_change((uint16_t)(r->start + i), r->shadow[i], nv);
+            r->shadow[i] = nv;
+        }
+    }
+}
+
+/* 线圈段：位级比对，回调传绝对地址 */
+static void mb_fill_coil_range(modbus_t *ctx, mb_coil_range_t *c) {
+    if (ctx->rx_len < 3) return;
+    uint16_t n = ctx->rx_buf[2];
+    uint16_t maxb = (uint16_t)((c->count + 7) / 8);
+    if (n > maxb) n = maxb;
+    if (n > c->shadow_cap) n = c->shadow_cap;
+    if (n == 0) return;
+
+    if (!c->baseline_done) {
+        memcpy(c->shadow, ctx->rx_buf + 3, n);
+        c->baseline_done = true;
+        return;
+    }
+    if (!ctx->on_master_coil_change) {
+        memcpy(c->shadow, ctx->rx_buf + 3, n);
+        return;
+    }
+    for (uint16_t i = 0; i < c->count; i++) {
+        uint8_t bi = (uint8_t)(i / 8);
+        if (bi >= n) break;
+        uint8_t bit = (uint8_t)(i % 8);
+        bool nv = (ctx->rx_buf[3 + bi] >> bit) & 0x01;
+        bool ov = (c->shadow[bi] >> bit) & 0x01;
+        if (nv != ov) {
+            ctx->on_master_coil_change((uint16_t)(c->start + i), ov, nv);
+            if (nv) c->shadow[bi] |= (uint8_t)(1u << bit);
+            else    c->shadow[bi] &= (uint8_t)~(1u << bit);
+        }
+    }
+}
+
+/* 一次性读：应答填调用方缓冲（大端拼装） */
+static void mb_fill_read_once(modbus_t *ctx, mb_read_once_t *ro) {
+    if (ctx->rx_len < 3 || !ro->buf) return;
+    uint16_t n = ctx->rx_buf[2];
+    if (ro->func == MODBUS_FC_READ_HOLDING_REGS) {
+        uint16_t cnt = n / 2;
+        if (cnt > ro->buf_cap) cnt = ro->buf_cap;
+        uint16_t *dst = (uint16_t *)ro->buf;
+        for (uint16_t i = 0; i < cnt; i++) {
+            dst[i] = (uint16_t)((ctx->rx_buf[3 + i * 2] << 8) |
+                                ctx->rx_buf[3 + i * 2 + 1]);
+        }
+    } else {
+        if (n > ro->buf_cap) n = ro->buf_cap;
+        memcpy(ro->buf, ctx->rx_buf + 3, n);
+    }
+}
+
+/* ===========================
+ * 应答钩子（modbus_core 在事务完成时回调）
+ * =========================== */
+static void mb_on_master_response(modbus_t *ctx) {
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (!a || !ctx->transaction.job) return;
+    mb_job_ref_t *ref = (mb_job_ref_t *)ctx->transaction.job;
+    int res = ctx->transaction.result;
+
+    if (res != 0) {
+        /* 失败（超时/异常）：一次性作业以失败收尾；周期读等下一周期重试 */
+        if (ref->kind == MB_JOB_WRITE) {
+            mb_write_job_t *w = (mb_write_job_t *)ref->ptr;
+            w->in_use = false;
+            if (w->done) w->done(res);
+        } else if (ref->kind == MB_JOB_READ_ONCE) {
+            mb_read_once_t *ro = (mb_read_once_t *)ref->ptr;
+            ro->in_use = false;
+            if (ro->done) ro->done(res);
+        }
+        ctx->transaction.job = NULL;
+        return;
+    }
+
+    switch (ref->kind) {
+        case MB_JOB_WRITE: {
+            mb_write_job_t *w = (mb_write_job_t *)ref->ptr;
+            w->in_use = false;
+            if (w->done) w->done(0);
+            break;
+        }
+        case MB_JOB_READ_ONCE: {
+            mb_read_once_t *ro = (mb_read_once_t *)ref->ptr;
+            mb_fill_read_once(ctx, ro);
+            ro->in_use = false;
+            if (ro->done) ro->done(0);
+            break;
+        }
+        case MB_JOB_REG_RANGE:
+            mb_fill_reg_range(ctx, (mb_reg_range_t *)ref->ptr);
+            break;
+        case MB_JOB_COIL_RANGE:
+            mb_fill_coil_range(ctx, (mb_coil_range_t *)ref->ptr);
+            break;
+        default:
+            break;
+    }
+    ctx->transaction.job = NULL;
+}
+
+/* ===========================
+ * 调度：发一帧
+ * =========================== */
+
+/* 登记在途作业引用并发送；返回 master_request_async 的结果 */
+static int mb_dispatch(modbus_t *ctx, mb_arbiter_t *a, uint8_t kind, void *ptr,
+                       uint8_t func_code, const uint8_t *req, uint16_t req_len) {
+    a->cur.kind = kind;
+    a->cur.ptr = ptr;
+    ctx->transaction.job = &a->cur;
+    int ret = master_request_async(ctx, func_code, req, req_len, NULL, NULL,
+                                   ctx->response_timeout);
+    if (ret != 0) {
+        ctx->transaction.job = NULL;
+        /* ★ 发送失败（TX_BUSY / 断线等）：立即释放作业槽并回调 done，
+         * 避免作业永久 in_use 把写队列 12 槽占满（曾导致波形 flush
+         * enqueue ret=-2 无限重试"卡死"）；上层（DOP107/boot-push）收到
+         * done 失败后下轮自行重新入队。周期读段常驻，仅跳过本轮。 */
+        if (kind == MB_JOB_WRITE) {
+            mb_write_job_t *w = (mb_write_job_t *)ptr;
+            w->in_use = false;
+            if (w->done) w->done(ret);
+        } else if (kind == MB_JOB_READ_ONCE) {
+            mb_read_once_t *ro = (mb_read_once_t *)ptr;
+            ro->in_use = false;
+            if (ro->done) ro->done(ret);
+        }
+        return ret;
+    }
+    a->last_send_tick = ctx->transport.get_tick();
+    return 0;
+}
+
+static void mb_send_write(modbus_t *ctx, mb_arbiter_t *a, int wi) {
+    mb_write_job_t *w = &a->writes[wi];
+    uint8_t req[256];
+    uint16_t n = 0;
+    switch (w->func) {
+        case MODBUS_FC_WRITE_SINGLE_REG:
+        case MODBUS_FC_WRITE_SINGLE_COIL:
+            req[n++] = (uint8_t)(w->addr >> 8);
+            req[n++] = (uint8_t)(w->addr & 0xFF);
+            req[n++] = (uint8_t)(w->data.value >> 8);
+            req[n++] = (uint8_t)(w->data.value & 0xFF);
+            break;
+        case MODBUS_FC_WRITE_MULTIPLE_REGS:
+            req[n++] = (uint8_t)(w->addr >> 8);
+            req[n++] = (uint8_t)(w->addr & 0xFF);
+            req[n++] = (uint8_t)(w->count >> 8);
+            req[n++] = (uint8_t)(w->count & 0xFF);
+            req[n++] = (uint8_t)(w->count * 2);
+            for (uint16_t i = 0; i < w->count; i++) {
+                req[n++] = (uint8_t)(w->data.regs[i] >> 8);
+                req[n++] = (uint8_t)(w->data.regs[i] & 0xFF);
+            }
+            break;
+        default:
+            w->in_use = false;
+            if (w->done) w->done(-1);
+            return;
+    }
+    (void)mb_dispatch(ctx, a, MB_JOB_WRITE, w, w->func, req, n);
+}
+
+static void mb_send_read_once(modbus_t *ctx, mb_arbiter_t *a, int ri) {
+    mb_read_once_t *ro = &a->reads[ri];
+    uint8_t req[4];
+    req[0] = (uint8_t)(ro->addr >> 8);
+    req[1] = (uint8_t)(ro->addr & 0xFF);
+    req[2] = (uint8_t)(ro->count >> 8);
+    req[3] = (uint8_t)(ro->count & 0xFF);
+    (void)mb_dispatch(ctx, a, MB_JOB_READ_ONCE, ro, ro->func, req, 4);
+}
+
+static void mb_send_reg_range(modbus_t *ctx, mb_arbiter_t *a, int ri) {
+    mb_reg_range_t *r = &a->regs[ri];
+    uint8_t req[4];
+    req[0] = (uint8_t)(r->start >> 8);
+    req[1] = (uint8_t)(r->start & 0xFF);
+    req[2] = (uint8_t)(r->count >> 8);
+    req[3] = (uint8_t)(r->count & 0xFF);
+    if (mb_dispatch(ctx, a, MB_JOB_REG_RANGE, r,
+                    MODBUS_FC_READ_HOLDING_REGS, req, 4) == 0) {
+        /* 发出即排下次（无应答时也按周期重试，与旧版 poll_interval 语义一致） */
+        r->next_due = a->last_send_tick + r->period_ms;
+    }
+}
+
+static void mb_send_coil_range(modbus_t *ctx, mb_arbiter_t *a, int ci) {
+    mb_coil_range_t *c = &a->coils[ci];
+    uint8_t req[4];
+    req[0] = (uint8_t)(c->start >> 8);
+    req[1] = (uint8_t)(c->start & 0xFF);
+    req[2] = (uint8_t)(c->count >> 8);
+    req[3] = (uint8_t)(c->count & 0xFF);
+    if (mb_dispatch(ctx, a, MB_JOB_COIL_RANGE, c,
+                    MODBUS_FC_READ_COILS, req, 4) == 0) {
+        c->next_due = a->last_send_tick + c->period_ms;
+    }
+}
+
+/* ===========================
+ * 仲裁器 tick（挂到 ctx->poll_callback，由 modbus_process 末尾调用）
+ * =========================== */
+static void mb_arbiter_tick(modbus_t *ctx) {
+    if (!ctx) return;
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (!a) return;
+    if (ctx->state != MODBUS_STATE_IDLE) return;
+    if (ctx->line_state == MODBUS_LINE_DISCONNECTED) return;   /* 断线不发，等重连 */
+
+    uint32_t now = ctx->transport.get_tick();
+
+    /* 帧节拍约束：查询指令 100ms 一条（读写一视同仁） */
+    if (a->min_frame_gap_ms > 0) {
+        if (now - a->last_send_tick < a->min_frame_gap_ms) return;
+    }
+
+    /* ---- 0. 防饿死：周期读错过最后期限（等待 > 2×period）→ 无条件提升 ---- */
+    {
+        int sel_reg = -1, sel_coil = -1;
+        int32_t best = INT32_MIN;
+        for (int i = 0; i < MB_POLL_REG_MAX; i++) {
+            mb_reg_range_t *r = &a->regs[i];
+            if (!r->in_use) continue;
+            int32_t d = (int32_t)(now - r->next_due);
+            if (d >= (int32_t)(r->period_ms * 2) && d > best) {
+                best = d; sel_reg = i;
+            }
+        }
+        for (int i = 0; i < MB_POLL_COIL_MAX; i++) {
+            mb_coil_range_t *c = &a->coils[i];
+            if (!c->in_use) continue;
+            int32_t d = (int32_t)(now - c->next_due);
+            if (d >= (int32_t)(c->period_ms * 2) && d > best) {
+                best = d; sel_coil = i;
+            }
+        }
+        if (sel_reg >= 0) { mb_send_reg_range(ctx, a, sel_reg); return; }
+        if (sel_coil >= 0) { mb_send_coil_range(ctx, a, sel_coil); return; }
+    }
+
+    /* ---- 1. 高优一次性作业：写 → 手动读（FIFO） ---- */
+    for (int i = 0; i < MB_WRITE_JOB_MAX; i++) {
+        if (a->writes[i].in_use) { mb_send_write(ctx, a, i); return; }
+    }
+    for (int i = 0; i < MB_READ_ONCE_MAX; i++) {
+        if (a->reads[i].in_use) { mb_send_read_once(ctx, a, i); return; }
+    }
+
+    /* ---- 2. 周期读：最早到期（EDF；寄存器段平局优先） ---- */
+    {
+        int sel_reg = -1, sel_coil = -1;
+        uint32_t best = 0xFFFFFFFFu;
+        for (int i = 0; i < MB_POLL_REG_MAX; i++) {
+            mb_reg_range_t *r = &a->regs[i];
+            if (!r->in_use) continue;
+            if ((int32_t)(now - r->next_due) < 0) continue;      /* 未到期 */
+            if (r->next_due < best) { best = r->next_due; sel_reg = i; }
+        }
+        for (int i = 0; i < MB_POLL_COIL_MAX; i++) {
+            mb_coil_range_t *c = &a->coils[i];
+            if (!c->in_use) continue;
+            if ((int32_t)(now - c->next_due) < 0) continue;
+            if (c->next_due < best) { best = c->next_due; sel_coil = i; }
+        }
+        if (sel_reg >= 0) { mb_send_reg_range(ctx, a, sel_reg); return; }
+        if (sel_coil >= 0) { mb_send_coil_range(ctx, a, sel_coil); return; }
+    }
+}
+
+/* ===========================
+ * 初始化
+ * =========================== */
 void modbus_master_init(modbus_t *ctx, const modbus_master_config_t *cfg) {
     if (!ctx || !cfg) return;
 
@@ -165,121 +465,182 @@ void modbus_master_init(modbus_t *ctx, const modbus_master_config_t *cfg) {
     modbus_set_slave_addr(ctx, cfg->target_slave_addr);
     modbus_set_timeouts(ctx, cfg->response_timeout_ms, 0, cfg->max_retries);
     modbus_set_reconnect_interval(ctx, cfg->reconnect_interval_ms);
-    
-    ctx->poll_interval = cfg->poll_interval_ms;
-    MODBUS_LOG("poll_interval = %lu", ctx->poll_interval);
-    ctx->data_map.holding_regs = cfg->reg_buffer;
-    ctx->data_map.holding_size = cfg->reg_buffer_size / 2;
-    ctx->data_map.coils = cfg->coil_buffer;
-    ctx->data_map.coils_size = cfg->coil_buffer_size * 8;
-    
-    // ★★★ 分配缓存 ★★★
-    if (cfg->reg_count > 0) {
-        ctx->last_regs = malloc(cfg->reg_count * sizeof(uint16_t));
-        ctx->last_regs_count = cfg->reg_count;
-        ctx->last_regs_start_addr = cfg->reg_start_addr;
-        memset(ctx->last_regs, 0, cfg->reg_count * sizeof(uint16_t));
-    }
-    if (cfg->coil_count > 0) {
-        uint16_t byte_count = (cfg->coil_count + 7) / 8;
-        ctx->last_coils = malloc(byte_count);
-        ctx->last_coils_count = cfg->coil_count;
-        ctx->last_coils_start_addr = cfg->coil_start_addr;
-        memset(ctx->last_coils, 0, byte_count);
-    }
-    
-    ctx->poll_callback = master_poll_task;
-    MODBUS_LOG("Master initialized, target=%d, interval=%lu ms",
-               cfg->target_slave_addr, cfg->poll_interval_ms);
+
+    ctx->poll_interval = cfg->poll_interval_ms ? cfg->poll_interval_ms : 100;
+
+    memset(&g_arbiter, 0, sizeof(g_arbiter));
+    g_arbiter.min_frame_gap_ms = cfg->min_frame_gap_ms ? cfg->min_frame_gap_ms
+                                                       : ctx->poll_interval;
+
+    ctx->master_priv = &g_arbiter;
+    ctx->on_master_response = mb_on_master_response;
+    ctx->poll_callback = mb_arbiter_tick;
+
+    MODBUS_LOG("Master arbiter initialized, target=%d, poll=%lu ms, gap=%lu ms",
+               cfg->target_slave_addr, (unsigned long)ctx->poll_interval,
+               (unsigned long)g_arbiter.min_frame_gap_ms);
 }
 
-// ===========================
-// 主机手动API
-// ===========================
-int modbus_master_read_coils(modbus_t *ctx, uint16_t addr, uint16_t count,
-                              uint8_t *buf, uint16_t *len) {
-    if (!ctx || !buf || !len || count == 0) return -1;
-    if (count > 2000) return -2;
-    uint8_t req_data[4] = {(addr >> 8) & 0xFF, addr & 0xFF,
-                           (count >> 8) & 0xFF, count & 0xFF};
-    *len = 0;
-    return master_request_async(ctx, MODBUS_FC_READ_COILS, req_data, 4, buf, len,
-                                   ctx->response_timeout * 2);
-}
-
-int modbus_master_read_holding_regs(modbus_t *ctx, uint16_t addr, uint16_t count,
-                                     uint16_t *buf, uint16_t *len) {
-    if (!ctx || !buf || !len || count == 0) return -1;
-    if (count > 125) return -2;
-    uint8_t req_data[4] = {(addr >> 8) & 0xFF, addr & 0xFF,
-                           (count >> 8) & 0xFF, count & 0xFF};
-    *len = 0;
-    return master_request_async(ctx, MODBUS_FC_READ_HOLDING_REGS, req_data, 4,
-                                   (uint8_t*)buf, len, ctx->response_timeout * 2);
-}
-
-int modbus_master_write_single_reg(modbus_t *ctx, uint16_t addr, uint16_t value) {
-    if (!ctx) return -1;
-    uint8_t req_data[4] = {(addr >> 8) & 0xFF, addr & 0xFF,
-                           (value >> 8) & 0xFF, value & 0xFF};
-    uint8_t resp_buf[8];
-    uint16_t resp_len = sizeof(resp_buf);
-    int ret = master_request_async(ctx, MODBUS_FC_WRITE_SINGLE_REG, req_data, 4,
-                                      resp_buf, &resp_len, ctx->response_timeout * 2);
-    if (ret == 0 && ctx->last_regs && addr < ctx->last_regs_count) {
-        ctx->last_regs[addr] = value;
+/* ===========================
+ * 多段轮询注册
+ * =========================== */
+int modbus_master_add_reg_range(modbus_t *ctx, uint16_t start, uint16_t count,
+                                uint16_t *shadow, uint16_t shadow_cap,
+                                uint32_t period_ms, uint32_t phase_ms) {
+    if (!ctx || !shadow || count == 0 || count > 125) return -1;
+    if (!ctx->transport.get_tick) return -4;    /* 传输层未挂载 */
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (!a) return -2;
+    for (int i = 0; i < MB_POLL_REG_MAX; i++) {
+        if (a->regs[i].in_use) continue;
+        mb_reg_range_t *r = &a->regs[i];
+        r->in_use = true;
+        r->start = start;
+        r->count = count;
+        r->shadow = shadow;
+        r->shadow_cap = shadow_cap;
+        r->period_ms = period_ms ? period_ms : ctx->poll_interval;
+        r->phase_ms = phase_ms;
+        r->next_due = ctx->transport.get_tick() + phase_ms;
+        r->baseline_done = false;
+        return 0;
     }
-    return ret;
+    return -3;   /* 表满 */
 }
 
-int modbus_master_write_single_coil(modbus_t *ctx, uint16_t addr, bool value) {
-    if (!ctx) return -1;
-    uint16_t val = value ? 0xFF00 : 0x0000;
-    uint8_t req_data[4] = {(addr >> 8) & 0xFF, addr & 0xFF,
-                           (val >> 8) & 0xFF, val & 0xFF};
-    uint8_t resp_buf[8];
-    uint16_t resp_len = sizeof(resp_buf);
-    int ret = master_request_async(ctx, MODBUS_FC_WRITE_SINGLE_COIL, req_data, 4,
-                                      resp_buf, &resp_len, ctx->response_timeout * 2);
-    if (ret == 0 && ctx->last_coils && addr < ctx->last_coils_count) {
-        uint8_t byte_idx = addr / 8;
-        uint8_t bit_idx = addr % 8;
-        if (value) {
-            ctx->last_coils[byte_idx] |= (1 << bit_idx);
-        } else {
-            ctx->last_coils[byte_idx] &= ~(1 << bit_idx);
-        }
+int modbus_master_add_coil_range(modbus_t *ctx, uint16_t start, uint16_t count,
+                                 uint8_t *shadow, uint16_t shadow_cap,
+                                 uint32_t period_ms, uint32_t phase_ms) {
+    if (!ctx || !shadow || count == 0 || count > 2000) return -1;
+    if (!ctx->transport.get_tick) return -4;
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (!a) return -2;
+    for (int i = 0; i < MB_POLL_COIL_MAX; i++) {
+        if (a->coils[i].in_use) continue;
+        mb_coil_range_t *c = &a->coils[i];
+        c->in_use = true;
+        c->start = start;
+        c->count = count;
+        c->shadow = shadow;
+        c->shadow_cap = shadow_cap;
+        c->period_ms = period_ms ? period_ms : ctx->poll_interval;
+        c->phase_ms = phase_ms;
+        c->next_due = ctx->transport.get_tick() + phase_ms;
+        c->baseline_done = false;
+        return 0;
     }
-    return ret;
+    return -3;
 }
 
-int modbus_master_write_multiple_regs(modbus_t *ctx, uint16_t addr,
-                                       uint16_t count, const uint16_t *values) {
-    if (!ctx || !values || count == 0) return -1;
-    if (count > 123) return -2;
-    uint8_t req_data[256];
-    uint16_t idx = 0;
-    req_data[idx++] = (addr >> 8) & 0xFF;
-    req_data[idx++] = addr & 0xFF;
-    req_data[idx++] = (count >> 8) & 0xFF;
-    req_data[idx++] = count & 0xFF;
-    req_data[idx++] = count * 2;
-    for (uint16_t i = 0; i < count; i++) {
-        req_data[idx++] = (values[i] >> 8) & 0xFF;
-        req_data[idx++] = values[i] & 0xFF;
+/* ===========================
+ * 一次性写作业
+ * =========================== */
+int modbus_master_write_reg_async(modbus_t *ctx, uint16_t addr, uint16_t val,
+                                  mb_job_done_t done) {
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (!a) return -1;
+    if (ctx->line_state == MODBUS_LINE_DISCONNECTED) return -3;   /* 断线：不入队防积压冻结 */
+    for (int i = 0; i < MB_WRITE_JOB_MAX; i++) {
+        if (a->writes[i].in_use) continue;
+        mb_write_job_t *w = &a->writes[i];
+        w->func = MODBUS_FC_WRITE_SINGLE_REG;
+        w->addr = addr;
+        w->count = 1;
+        w->data.value = val;
+        w->done = done;
+        w->in_use = true;
+        return 0;
     }
-    uint8_t resp_buf[8];
-    uint16_t resp_len = sizeof(resp_buf);
-    int ret = master_request_async(ctx, MODBUS_FC_WRITE_MULTIPLE_REGS, req_data, idx,
-                                      resp_buf, &resp_len, ctx->response_timeout * 2);
-    if (ret == 0 && ctx->last_regs) {
-        for (uint16_t i = 0; i < count && (addr + i) < ctx->last_regs_count; i++) {
-            ctx->last_regs[addr + i] = values[i];
-        }
-    }
-    return ret;
+    return -2;   /* 槽满 */
 }
 
+int modbus_master_write_regs_async(modbus_t *ctx, uint16_t addr, uint16_t count,
+                                   const uint16_t *vals, mb_job_done_t done) {
+    if (!vals || count == 0 || count > 123) return -1;
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (!a) return -2;
+    if (ctx->line_state == MODBUS_LINE_DISCONNECTED) return -3;   /* 断线：不入队防积压冻结 */
+    for (int i = 0; i < MB_WRITE_JOB_MAX; i++) {
+        if (a->writes[i].in_use) continue;
+        mb_write_job_t *w = &a->writes[i];
+        w->func = MODBUS_FC_WRITE_MULTIPLE_REGS;
+        w->addr = addr;
+        w->count = count;
+        w->data.regs = vals;
+        w->done = done;
+        w->in_use = true;
+        return 0;
+    }
+    return -2;
+}
+
+int modbus_master_write_coil_async(modbus_t *ctx, uint16_t addr, bool val,
+                                   mb_job_done_t done) {
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (!a) return -1;
+    if (ctx->line_state == MODBUS_LINE_DISCONNECTED) return -3;   /* 断线：不入队防积压冻结 */
+    for (int i = 0; i < MB_WRITE_JOB_MAX; i++) {
+        if (a->writes[i].in_use) continue;
+        mb_write_job_t *w = &a->writes[i];
+        w->func = MODBUS_FC_WRITE_SINGLE_COIL;
+        w->addr = addr;
+        w->count = 1;
+        w->data.value = val ? 0xFF00 : 0x0000;
+        w->done = done;
+        w->in_use = true;
+        return 0;
+    }
+    return -2;
+}
+
+/* ===========================
+ * 一次性读作业（未注册地址也可读）
+ * =========================== */
+int modbus_master_read_regs_async(modbus_t *ctx, uint16_t addr, uint16_t count,
+                                  uint16_t *buf, uint16_t buf_cap, mb_job_done_t done) {
+    if (!buf || count == 0 || count > 125) return -1;
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (!a) return -2;
+    if (ctx->line_state == MODBUS_LINE_DISCONNECTED) return -3;   /* 断线：不入队防积压冻结 */
+    for (int i = 0; i < MB_READ_ONCE_MAX; i++) {
+        if (a->reads[i].in_use) continue;
+        mb_read_once_t *ro = &a->reads[i];
+        ro->func = MODBUS_FC_READ_HOLDING_REGS;
+        ro->addr = addr;
+        ro->count = count;
+        ro->buf = buf;
+        ro->buf_cap = buf_cap;
+        ro->done = done;
+        ro->in_use = true;
+        return 0;
+    }
+    return -2;
+}
+
+int modbus_master_read_coils_async(modbus_t *ctx, uint16_t addr, uint16_t count,
+                                   uint8_t *buf, uint16_t buf_cap, mb_job_done_t done) {
+    if (!buf || count == 0 || count > 2000) return -1;
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (!a) return -2;
+    if (ctx->line_state == MODBUS_LINE_DISCONNECTED) return -3;   /* 断线：不入队防积压冻结 */
+    for (int i = 0; i < MB_READ_ONCE_MAX; i++) {
+        if (a->reads[i].in_use) continue;
+        mb_read_once_t *ro = &a->reads[i];
+        ro->func = MODBUS_FC_READ_COILS;
+        ro->addr = addr;
+        ro->count = count;
+        ro->buf = buf;
+        ro->buf_cap = buf_cap;
+        ro->done = done;
+        ro->in_use = true;
+        return 0;
+    }
+    return -2;
+}
+
+/* ===========================
+ * 配置与回调
+ * =========================== */
 void modbus_master_set_reg_change_callback(modbus_t *ctx,
     void (*callback)(uint16_t addr, uint16_t old_val, uint16_t new_val)) {
     if (ctx) ctx->on_master_reg_change = callback;
@@ -291,11 +652,21 @@ void modbus_master_set_coil_change_callback(modbus_t *ctx,
 }
 
 void modbus_master_set_poll_interval(modbus_t *ctx, uint32_t interval_ms) {
-    if (ctx) ctx->poll_interval = interval_ms;
+    if (ctx && interval_ms > 0) ctx->poll_interval = interval_ms;
 }
 
-void modbus_master_trigger_poll(modbus_t *ctx) {
-    if (ctx && ctx->poll_callback && ctx->state == MODBUS_STATE_IDLE) {
-        ctx->poll_callback(ctx);
-    }
+void modbus_master_set_min_frame_gap(modbus_t *ctx, uint32_t gap_ms) {
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (a) a->min_frame_gap_ms = gap_ms;
+}
+
+int modbus_master_pending_jobs(modbus_t *ctx) {
+    mb_arbiter_t *a = mb_get_arbiter(ctx);
+    if (!a) return -1;
+    int n = 0;
+    for (int i = 0; i < MB_WRITE_JOB_MAX; i++) if (a->writes[i].in_use) n++;
+    for (int i = 0; i < MB_READ_ONCE_MAX; i++) if (a->reads[i].in_use) n++;
+    for (int i = 0; i < MB_POLL_REG_MAX; i++) if (a->regs[i].in_use) n++;
+    for (int i = 0; i < MB_POLL_COIL_MAX; i++) if (a->coils[i].in_use) n++;
+    return n;
 }

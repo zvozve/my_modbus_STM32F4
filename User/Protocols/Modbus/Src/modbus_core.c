@@ -115,6 +115,8 @@ static void check_line_status(modbus_t *ctx) {
                         ctx->transaction.completed = true;
                         ctx->transaction.result = -1;
                         if (ctx->transaction.resp_len) *ctx->transaction.resp_len = 0;
+                        /* 通知 master 层：当前作业以失败收尾（释放作业槽 / 回调 done） */
+                        if (ctx->on_master_response) ctx->on_master_response(ctx);
                     }
                 } else {
                     ctx->line_state = MODBUS_LINE_TIMEOUT;
@@ -344,16 +346,11 @@ void modbus_process(modbus_t *ctx) {
     // 断线检测
     check_line_status(ctx);
     
-    // 主机轮询（只在 IDLE 状态发起新请求）
-    if (ctx->role == MODBUS_ROLE_MASTER && ctx->poll_callback) {
-        if (ctx->state == MODBUS_STATE_IDLE) {
-            if (now - ctx->last_poll_tick >= ctx->poll_interval) {
-                ctx->last_poll_tick = now;
-                ctx->poll_callback(ctx);
-            }
-        }
-    }
-    
+    /* ★ 主机轮询已移到本函数末尾（接收处理之后）——原因见文末注释。
+     *   在此处判定会导致轮询永久饿死：此刻 state 必为 WAITING（本次应答
+     *   还没解析），轮询排不上；而应答解析后腾出的 IDLE 又会被同一轮
+     *   主循环里后续任务的后台写（波形写出等）抢走。 */
+
     // 检查接收数据
     uint16_t available = ctx->transport.peek(ctx->transport.ctx);
     if (available > 0) {
@@ -394,20 +391,100 @@ void modbus_process(modbus_t *ctx) {
                             ctx->transaction.completed = true;
                             ctx->transaction.result = -2;
                             if (ctx->transaction.resp_len) *ctx->transaction.resp_len = 0;
+                            /* 通知 master 层：当前作业以异常失败收尾 */
+                            if (ctx->on_master_response) ctx->on_master_response(ctx);
                         } else {
                             ctx->state = MODBUS_STATE_IDLE;
                             ctx->timeout_count = 0;
+                            ctx->transaction.result = 0;
+                            /* 数据落地移入 master 层钩子：按 transaction.job 路由到
+                             * 各段 shadow / 一次性作业 / 写作业（多段轮询依赖此路由）。
+                             * 无钩子时退化为旧版单缓冲 data_map 路径（兼容未挂载仲裁器的用法）。 */
+                            if (ctx->on_master_response) {
+                                ctx->on_master_response(ctx);
+                            } else {
+                                uint8_t fc = ctx->transaction.func_code;
+                                if (fc == MODBUS_FC_READ_HOLDING_REGS &&
+                                    ctx->data_map.holding_regs && ctx->rx_len >= 3) {
+                                    uint16_t n = ctx->rx_buf[2];
+                                    uint16_t maxb = ctx->data_map.holding_size * 2;
+                                    if (n > maxb) n = maxb;
+                                    /* Modbus 保持寄存器为大端字节序：必须逐寄存器拼装，
+                                     * 不能直接 memcpy 到 uint16_t 缓冲——小端机下会把
+                                     * 线上的 00 02 存成 0x0200=512，导致 STATE 等字段越界。 */
+                                    {
+                                        uint16_t cnt = n / 2;
+                                        for (uint16_t i = 0; i < cnt; i++) {
+                                            ctx->data_map.holding_regs[i] =
+                                                (uint16_t)((ctx->rx_buf[3 + i * 2] << 8) |
+                                                            ctx->rx_buf[3 + i * 2 + 1]);
+                                        }
+                                    }
+                                    if (ctx->on_master_reg_change && ctx->last_regs) {
+                                        uint16_t cnt = n / 2;
+                                        if (cnt > ctx->last_regs_count) cnt = ctx->last_regs_count;
+                                        if (!ctx->reg_baseline_done) {
+                                            for (uint16_t i = 0; i < cnt; i++)
+                                                ctx->last_regs[i] = ctx->data_map.holding_regs[i];
+                                            ctx->reg_baseline_done = true;
+                                        } else {
+                                            for (uint16_t i = 0; i < cnt; i++) {
+                                                if (ctx->data_map.holding_regs[i] != ctx->last_regs[i]) {
+                                                    ctx->on_master_reg_change(i, ctx->last_regs[i],
+                                                                             ctx->data_map.holding_regs[i]);
+                                                    ctx->last_regs[i] = ctx->data_map.holding_regs[i];
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        ctx->reg_baseline_done = true;
+                                    }
+                                } else if (fc == MODBUS_FC_READ_COILS &&
+                                           ctx->data_map.coils && ctx->rx_len >= 3) {
+                                    uint16_t n = ctx->rx_buf[2];
+                                    uint16_t maxb = (ctx->data_map.coils_size + 7) / 8;
+                                    if (n > maxb) n = maxb;
+                                    memcpy(ctx->data_map.coils, ctx->rx_buf + 3, n);
+                                    if (ctx->on_master_coil_change && ctx->last_coils) {
+                                        uint16_t cnt = ctx->last_coils_count;
+                                        if (!ctx->coil_baseline_done) {
+                                            for (uint16_t i = 0; i < cnt; i++) {
+                                                uint8_t bi = (uint8_t)(i / 8);
+                                                uint8_t bit = (uint8_t)(i % 8);
+                                                if ((ctx->data_map.coils[bi] >> bit) & 0x01)
+                                                    ctx->last_coils[bi] |= (uint8_t)(1u << bit);
+                                                else
+                                                    ctx->last_coils[bi] &= (uint8_t)~(1u << bit);
+                                            }
+                                            ctx->coil_baseline_done = true;
+                                        } else {
+                                            for (uint16_t i = 0; i < cnt; i++) {
+                                                uint8_t bi = (uint8_t)(i / 8);
+                                                uint8_t bit = (uint8_t)(i % 8);
+                                                bool nv = (ctx->data_map.coils[bi] >> bit) & 0x01;
+                                                bool ov = (ctx->last_coils[bi] >> bit) & 0x01;
+                                                if (nv != ov) {
+                                                    ctx->on_master_coil_change(i, ov, nv);
+                                                    if (nv) ctx->last_coils[bi] |= (uint8_t)(1u << bit);
+                                                    else   ctx->last_coils[bi] &= (uint8_t)~(1u << bit);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        ctx->coil_baseline_done = true;
+                                    }
+                                }
+                            }
+                            /* 兼容：仍有调用方显式提供 resp 缓冲时写入原始帧 */
                             if (ctx->transaction.resp_data && ctx->transaction.resp_len) {
                                 uint16_t data_len = ctx->rx_len;
-                                if (data_len > *ctx->transaction.resp_len) {
+                                if (data_len > *ctx->transaction.resp_len)
                                     data_len = *ctx->transaction.resp_len;
-                                }
                                 memcpy(ctx->transaction.resp_data, ctx->rx_buf, data_len);
                                 *ctx->transaction.resp_len = data_len;
                             }
                             ctx->transaction.pending = false;
                             ctx->transaction.completed = true;
-                            ctx->transaction.result = 0;
                         }
                     } else {
                         MODBUS_LOG("CRC error");
@@ -435,12 +512,34 @@ void modbus_process(modbus_t *ctx) {
             }
         }
     }
+
+    /* ===== 主机轮询：必须放在“接收处理”之后 =====
+     * 此刻本次应答刚被解析完、state 已回到 IDLE，轮询可以立即抢占总线。
+     *
+     * 为什么不能放在函数开头（2026-08-17 修复的实机故障）：
+     *   主循环顺序是 TaskModbus_M_Process(→本函数) → ... → TaskWave_Process。
+     *   放开头时，每一轮进来 state 都还是 WAITING（应答在本函数后半段才解析），
+     *   轮询条件永远不成立；而后半段解析应答腾出的那个 IDLE，会被同一轮里
+     *   随后执行的 TaskWave_Process（波形分帧写出）立刻抢走 → 总线被后台写
+     *   100% 占满，func=0x03 读帧一次都发不出去。
+     *   后果：屏端参数（如 W1 动作线设值）被用户改了，MCU 永远读不回来，
+     *         on_master_reg_change 不触发 → 参考线不重写、日志无输出。
+     * 放在末尾后，轮询到期时最多延迟一次事务（约一帧时间）即可拿到总线。
+     *
+     * 2026-08-18 起：间隔判定（poll_interval / last_poll_tick）移除，
+     * 由 master 层仲裁器（poll_callback = mb_arbiter_tick）内部统一调度：
+     * 帧节拍 min_frame_gap + 各作业独立周期/相位 + 优先级都在那里处理。 */
+    if (ctx->role == MODBUS_ROLE_MASTER && ctx->poll_callback) {
+        if (ctx->state == MODBUS_STATE_IDLE) {
+            ctx->poll_callback(ctx);
+        }
+    }
 }
 
 // ===========================
 // 核心API实现
 // ===========================
-void modbus_init(modbus_t *ctx) {
+void modbus_init(modbus_t *ctx) {    
     memset(ctx, 0, sizeof(modbus_t));
     ctx->slave_addr = 1;
     ctx->role = MODBUS_ROLE_SLAVE;

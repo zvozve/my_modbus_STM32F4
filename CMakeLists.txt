@@ -69,6 +69,9 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # App
     User/App/Inc
     
+    # Common
+    User/Common/Inc
+
     # BSP
     User/BSP/bsp_dwt/Inc
     User/BSP/bsp_uart/Inc

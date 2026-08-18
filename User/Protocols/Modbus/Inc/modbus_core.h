@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define MB_RTU_DRVIER_VERSION "5.0.1"
+#define MB_RTU_DRVIER_VERSION "4.0.1"
 #define MB_RTU_DRVIER_DATE "2026-08-14"
 
 // ===========================
@@ -25,7 +25,7 @@ extern "C" {
     #define MB_GET_TICK()      xTaskGetTickCount()
     #define MB_Delay_ms(ms)    vTaskDelay(pdMS_TO_TICKS(ms))
 #else
-    #include "stm32f4xx_hal.h"
+    #include "hal_platform.h"   /* STM32 系列 HAL 统一入口（HAL_GetTick/HAL_Delay） */
     #define MB_GET_TICK()      HAL_GetTick()
     #define MB_Delay_ms(ms)    HAL_Delay(ms)
 #endif
@@ -171,21 +171,29 @@ typedef struct modbus_instance {
         uint16_t req_len;
         uint8_t *resp_data;
         uint16_t *resp_len;
+        uint8_t func_code;
         bool pending;
         bool completed;
         int result;
+        void *job;              /* 当前事务对应的作业引用（仲裁器设置，应答钩子使用） */
     } transaction;
     
     // 主机轮询
     void (*poll_callback)(struct modbus_instance *ctx);
     uint32_t poll_interval;
     uint32_t last_poll_tick;
+
+    // 主机应答分发钩子（modbus_master 仲裁器挂载）
+    void (*on_master_response)(struct modbus_instance *ctx);
+    void *master_priv;          /* 仲裁器实例（master 层私有数据） */
     
     // 主机缓存（检测变化用）
     uint16_t *last_regs;
     uint8_t *last_coils;
     uint16_t last_regs_count;
     uint16_t last_coils_count;
+    bool reg_baseline_done;
+    bool coil_baseline_done;
     uint16_t last_regs_start_addr;
     uint16_t last_coils_start_addr;
 
