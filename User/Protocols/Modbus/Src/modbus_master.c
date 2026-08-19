@@ -115,6 +115,7 @@ typedef struct {
         const uint16_t *regs;  /* 多寄存器：调用方持有，done 回调前必须保持有效 */
     } data;
     bool in_use;
+    uint16_t seq;              /* 入队序号：仲裁器按最小 seq 选择（真 FIFO） */
     mb_job_done_t done;
 } mb_write_job_t;
 
@@ -125,6 +126,7 @@ typedef struct {
     void *buf;                 /* 调用方缓冲（寄存器=words 数组，线圈=字节数组） */
     uint16_t buf_cap;
     bool in_use;
+    uint16_t seq;              /* 入队序号（与写作业同计数器） */
     mb_job_done_t done;
 } mb_read_once_t;
 
@@ -136,6 +138,7 @@ typedef struct {
     mb_job_ref_t    cur;               /* 当前在途作业引用 */
     uint32_t min_frame_gap_ms;
     uint32_t last_send_tick;
+    uint16_t job_seq;                  /* 一次性作业入队序号（写+读共用，单调递增） */
 } mb_arbiter_t;
 
 /* 本工程单主机：静态分配（多主机场景需改为按 ctx 分配） */
@@ -425,12 +428,32 @@ static void mb_arbiter_tick(modbus_t *ctx) {
         if (sel_coil >= 0) { mb_send_coil_range(ctx, a, sel_coil); return; }
     }
 
-    /* ---- 1. 高优一次性作业：写 → 手动读（FIFO） ---- */
-    for (int i = 0; i < MB_WRITE_JOB_MAX; i++) {
-        if (a->writes[i].in_use) { mb_send_write(ctx, a, i); return; }
+    /* ---- 1. 高优一次性作业：写 → 手动读（真 FIFO，按入队序号最小优先） ----
+     * ⚠️ 2026-08-19 修复：原实现"槽号优先"（for i=0 找第一个 in_use）在波形
+     * 背靠背滚动下会饿死其他写作业——波形帧 done 回调里立即入队下一帧，永远
+     * 抢回最小槽位，sel 反转回写/参考线等后入队的大槽作业永远轮不到（实机：
+     * 改 sel 后屏上到位/反弹值不刷新）。改为选 seq 最小 = 先入队先发。 */
+    {
+        int    best_w = -1;
+        uint16_t best_seq = 0xFFFF;
+        for (int i = 0; i < MB_WRITE_JOB_MAX; i++) {
+            if (a->writes[i].in_use && a->writes[i].seq < best_seq) {
+                best_seq = a->writes[i].seq;
+                best_w   = i;
+            }
+        }
+        if (best_w >= 0) { mb_send_write(ctx, a, best_w); return; }
     }
-    for (int i = 0; i < MB_READ_ONCE_MAX; i++) {
-        if (a->reads[i].in_use) { mb_send_read_once(ctx, a, i); return; }
+    {
+        int    best_r = -1;
+        uint16_t best_seq = 0xFFFF;
+        for (int i = 0; i < MB_READ_ONCE_MAX; i++) {
+            if (a->reads[i].in_use && a->reads[i].seq < best_seq) {
+                best_seq = a->reads[i].seq;
+                best_r   = i;
+            }
+        }
+        if (best_r >= 0) { mb_send_read_once(ctx, a, best_r); return; }
     }
 
     /* ---- 2. 周期读：最早到期（EDF；寄存器段平局优先） ---- */
@@ -547,6 +570,7 @@ int modbus_master_write_reg_async(modbus_t *ctx, uint16_t addr, uint16_t val,
         w->addr = addr;
         w->count = 1;
         w->data.value = val;
+        w->seq = ++a->job_seq;
         w->done = done;
         w->in_use = true;
         return 0;
@@ -567,6 +591,7 @@ int modbus_master_write_regs_async(modbus_t *ctx, uint16_t addr, uint16_t count,
         w->addr = addr;
         w->count = count;
         w->data.regs = vals;
+        w->seq = ++a->job_seq;
         w->done = done;
         w->in_use = true;
         return 0;
@@ -586,6 +611,7 @@ int modbus_master_write_coil_async(modbus_t *ctx, uint16_t addr, bool val,
         w->addr = addr;
         w->count = 1;
         w->data.value = val ? 0xFF00 : 0x0000;
+        w->seq = ++a->job_seq;
         w->done = done;
         w->in_use = true;
         return 0;
@@ -610,6 +636,7 @@ int modbus_master_read_regs_async(modbus_t *ctx, uint16_t addr, uint16_t count,
         ro->count = count;
         ro->buf = buf;
         ro->buf_cap = buf_cap;
+        ro->seq = ++a->job_seq;
         ro->done = done;
         ro->in_use = true;
         return 0;
@@ -631,6 +658,7 @@ int modbus_master_read_coils_async(modbus_t *ctx, uint16_t addr, uint16_t count,
         ro->count = count;
         ro->buf = buf;
         ro->buf_cap = buf_cap;
+        ro->seq = ++a->job_seq;
         ro->done = done;
         ro->in_use = true;
         return 0;
