@@ -31,10 +31,20 @@ extern "C" {
 #endif
 
 // ===========================
+// 传输开关（文件内宏门控，配合 CMake 统一引入所有源文件；带 #ifndef 守卫，可被 CMake -D 覆盖）
+// ===========================
+#ifndef MODBUS_ENABLE_RTU
+#define MODBUS_ENABLE_RTU   1
+#endif
+#ifndef MODBUS_ENABLE_TCP
+#define MODBUS_ENABLE_TCP   0
+#endif
+
+// ===========================
 // 配置
 // ===========================
 #define MODBUS_MAX_INSTANCES    4
-#define MODBUS_RTU_BUF_SIZE     256
+#define MODBUS_BUF_SIZE         260   // RTU: addr+PDU(253)+CRC(2)=256; TCP: MBAP(7)+PDU(253)=260
 #define MODBUS_BROADCAST_ADDR   0
 
 // ===========================
@@ -74,6 +84,7 @@ typedef enum {
 typedef enum {
     MODBUS_MODE_RTU,
     MODBUS_MODE_ASCII,
+    MODBUS_MODE_TCP,
 } modbus_mode_t;
 
 // ===========================
@@ -114,6 +125,12 @@ typedef struct {
     uint16_t (*recv)(void *ctx, uint8_t *buf, uint16_t len);
     uint32_t (*get_tick)(void);
     void (*delay)(uint32_t ms);
+    /* 帧封装交给端口层：core 只处理纯 PDU（RTU:加/验CRC；TCP:加/剥MBAP）。
+     * 未注册(NULL)时 core 直接收发 PDU（兼容裸传输）。 */
+    uint16_t (*frame_tx)(void *ctx, const uint8_t *pdu, uint16_t pdu_len,
+                         uint8_t *out, uint16_t out_cap);
+    int      (*frame_rx)(void *ctx, uint8_t *raw, uint16_t *raw_len);
+    void     (*port_poll)(void *ctx);   /* TCP: accept/connect/重连; RTU: 可 NULL */
     void *ctx;
 } modbus_transport_t;
 
@@ -131,8 +148,9 @@ typedef struct modbus_instance {
     modbus_transport_t transport;
     
     // 帧缓冲区
-    uint8_t tx_buf[MODBUS_RTU_BUF_SIZE];
-    uint8_t rx_buf[MODBUS_RTU_BUF_SIZE];
+    uint8_t tx_buf[MODBUS_BUF_SIZE];
+    uint8_t rx_buf[MODBUS_BUF_SIZE];
+    uint8_t tx_frame[MODBUS_BUF_SIZE];   /* frame_tx 输出（含 RTU CRC / TCP MBAP） */
     uint16_t tx_len;
     uint16_t rx_len;
     
@@ -227,8 +245,6 @@ uint32_t modbus_get_last_activity(modbus_t *ctx);
 
 void modbus_register_instance(modbus_t *ctx);
 void modbus_unregister_instance(modbus_t *ctx);
-
-uint16_t modbus_crc16(const uint8_t *data, uint16_t len);
 
 #ifdef __cplusplus
 }

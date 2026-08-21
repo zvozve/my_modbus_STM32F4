@@ -1,5 +1,8 @@
 #include "modbus_uart_adapter.h"
+
+#ifdef MODBUS_ENABLE_RTU
 #include "bsp_uart_drv.h"
+#include "modbus_rtu.h"
 #include "SEGGER_RTT_Log.h"
 #include <string.h>
 
@@ -63,7 +66,12 @@ void modbus_uart_adapter_init(modbus_t *modbus_ctx, uart_drv_t *uart_drv) {
         .recv = uart_recv,
         .peek = uart_peek,
         .get_tick = uart_get_tick,
+        .frame_tx = rtu_frame_tx,
+        .frame_rx = rtu_frame_rx,
+        .port_poll = NULL,
     };
     
     modbus_set_transport(modbus_ctx, &transport);
 }
+
+#endif /* MODBUS_ENABLE_RTU */

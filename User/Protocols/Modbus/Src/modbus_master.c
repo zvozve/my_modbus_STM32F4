@@ -20,11 +20,7 @@ static int master_request_async(modbus_t *ctx, uint8_t func_code,
     if (req_data && req_len > 0) {
         memcpy(ctx->tx_buf + 2, req_data, req_len);
     }
-    uint16_t len = 2 + req_len;
-    uint16_t crc = modbus_crc16(ctx->tx_buf, len);
-    ctx->tx_buf[len] = crc & 0xFF;
-    ctx->tx_buf[len + 1] = (crc >> 8) & 0xFF;
-    ctx->tx_len = len + 2;
+    ctx->tx_len = 2 + req_len;   /* PDU 长度（不含帧封装） */
     
     MODBUS_LOG("Master send: func=0x%02X", func_code);
     HEX_LOG("TX: ", ctx->tx_buf, ctx->tx_len);
@@ -39,7 +35,15 @@ static int master_request_async(modbus_t *ctx, uint8_t func_code,
     ctx->transaction.result = -1;
     if (resp_len) *resp_len = 0;
     
-    int ret = ctx->transport.send(ctx->transport.ctx, ctx->tx_buf, ctx->tx_len);
+    uint8_t *send_buf = ctx->tx_buf;
+    uint16_t send_len = ctx->tx_len;
+    if (ctx->transport.frame_tx) {
+        send_len = ctx->transport.frame_tx(ctx->transport.ctx,
+                                           ctx->tx_buf, ctx->tx_len,
+                                           ctx->tx_frame, MODBUS_BUF_SIZE);
+        send_buf = ctx->tx_frame;
+    }
+    int ret = ctx->transport.send(ctx->transport.ctx, send_buf, send_len);
     if (ret != 0) {
         ctx->transaction.pending = false;
         return ret;

@@ -12,20 +12,7 @@ static uint8_t g_modbus_instance_count = 0;
 // ===========================
 // CRC16
 // ===========================
-uint16_t modbus_crc16(const uint8_t *data, uint16_t len) {
-    uint16_t crc = 0xFFFF;
-    for (uint16_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 0x0001) {
-                crc = (crc >> 1) ^ 0xA001;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    return crc;
-}
+// CRC16 已移至 modbus_rtu.c（RTU 帧封装，#ifdef MODBUS_ENABLE_RTU）
 
 // ===========================
 // 实例管理
@@ -122,9 +109,16 @@ static void check_line_status(modbus_t *ctx) {
                     ctx->line_state = MODBUS_LINE_TIMEOUT;
                     if (ctx->transaction.req_data && ctx->transaction.req_len > 0) {
                         MODBUS_LOG("Retry send...");
-                        ctx->transport.send(ctx->transport.ctx, 
-                                           ctx->transaction.req_data,
-                                           ctx->transaction.req_len);
+                        uint8_t *rbuf = ctx->transaction.req_data;
+                        uint16_t rlen = ctx->transaction.req_len;
+                        if (ctx->transport.frame_tx) {
+                            rlen = ctx->transport.frame_tx(ctx->transport.ctx,
+                                                           ctx->transaction.req_data,
+                                                           ctx->transaction.req_len,
+                                                           ctx->tx_frame, MODBUS_BUF_SIZE);
+                            rbuf = ctx->tx_frame;
+                        }
+                        ctx->transport.send(ctx->transport.ctx, rbuf, rlen);
                         ctx->send_tick = now;
                     }
                 }
@@ -323,13 +317,17 @@ static void process_slave_request(modbus_t *ctx) {
     }
     
     if (!is_broadcast && resp_len > 0) {
-        uint16_t crc = modbus_crc16(ctx->tx_buf, resp_len);
-        ctx->tx_buf[resp_len] = crc & 0xFF;
-        ctx->tx_buf[resp_len + 1] = (crc >> 8) & 0xFF;
-        resp_len += 2;
         MODBUS_LOG("Slave response len=%d", resp_len);
         HEX_LOG("TX: ", ctx->tx_buf, resp_len);
-        ctx->transport.send(ctx->transport.ctx, ctx->tx_buf, resp_len);
+        uint8_t *send_buf = ctx->tx_buf;
+        uint16_t send_len = resp_len;
+        if (ctx->transport.frame_tx) {
+            send_len = ctx->transport.frame_tx(ctx->transport.ctx,
+                                               ctx->tx_buf, resp_len,
+                                               ctx->tx_frame, MODBUS_BUF_SIZE);
+            send_buf = ctx->tx_frame;
+        }
+        ctx->transport.send(ctx->transport.ctx, send_buf, send_len);
         ctx->state = MODBUS_STATE_SENDING;
     }
 }
@@ -356,7 +354,7 @@ void modbus_process(modbus_t *ctx) {
     if (available > 0) {
         uint16_t read_len = ctx->transport.recv(ctx->transport.ctx, 
                                                  ctx->rx_buf,
-                                                 MODBUS_RTU_BUF_SIZE);
+                                                 MODBUS_BUF_SIZE);
         if (read_len > 0) {
             ctx->rx_len = read_len;
             ctx->last_activity_tick = now;
@@ -378,11 +376,8 @@ void modbus_process(modbus_t *ctx) {
             
             if (ctx->role == MODBUS_ROLE_MASTER) {
                 if (ctx->state == MODBUS_STATE_WAITING_RESPONSE && ctx->rx_len >= 4) {
-                    uint16_t crc_calc = modbus_crc16(ctx->rx_buf, ctx->rx_len - 2);
-                    uint16_t crc_recv = ctx->rx_buf[ctx->rx_len - 2] | 
-                                       (ctx->rx_buf[ctx->rx_len - 1] << 8);
-                    
-                    if (crc_calc == crc_recv) {
+                    if (ctx->transport.frame_rx == NULL ||
+                        ctx->transport.frame_rx(ctx->transport.ctx, ctx->rx_buf, &ctx->rx_len) == 0) {
                         MODBUS_LOG("Master recv valid response");
                         if (ctx->rx_buf[1] & 0x80) {
                             MODBUS_LOG("Exception: 0x%02X", ctx->rx_buf[2]);
@@ -487,7 +482,7 @@ void modbus_process(modbus_t *ctx) {
                             ctx->transaction.completed = true;
                         }
                     } else {
-                        MODBUS_LOG("CRC error");
+                        MODBUS_LOG("Frame error");
                     }
                     ctx->rx_len = 0;
                 }
@@ -495,14 +490,12 @@ void modbus_process(modbus_t *ctx) {
                 if (ctx->rx_len >= 4) {
                     uint8_t addr = ctx->rx_buf[0];
                     if (addr == ctx->slave_addr || addr == MODBUS_BROADCAST_ADDR) {
-                        uint16_t crc_calc = modbus_crc16(ctx->rx_buf, ctx->rx_len - 2);
-                        uint16_t crc_recv = ctx->rx_buf[ctx->rx_len - 2] | 
-                                           (ctx->rx_buf[ctx->rx_len - 1] << 8);
-                        if (crc_calc == crc_recv) {
+                        if (ctx->transport.frame_rx == NULL ||
+                            ctx->transport.frame_rx(ctx->transport.ctx, ctx->rx_buf, &ctx->rx_len) == 0) {
                             ctx->state = MODBUS_STATE_PROCESSING;
                             process_slave_request(ctx);
                         } else {
-                            MODBUS_LOG("CRC error");
+                            MODBUS_LOG("Frame error");
                         }
                     } else {
                         MODBUS_LOG("Addr mismatch: 0x%02X != 0x%02X", addr, ctx->slave_addr);
