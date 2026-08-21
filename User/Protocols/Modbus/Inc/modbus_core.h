@@ -37,7 +37,7 @@ extern "C" {
 #define MODBUS_ENABLE_RTU   1
 #endif
 #ifndef MODBUS_ENABLE_TCP
-#define MODBUS_ENABLE_TCP   0
+#define MODBUS_ENABLE_TCP   1
 #endif
 
 // ===========================

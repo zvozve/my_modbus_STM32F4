@@ -195,10 +195,13 @@ static void process_slave_request(modbus_t *ctx) {
                 break;
             }
             if (!ctx->data_map.holding_regs || start_addr + count > ctx->data_map.holding_size) {
+                MODBUS_LOG("HR 0x02: start=%u cnt=%u map=%u regs=%p",
+                           start_addr, count, ctx->data_map.holding_size,
+                           (void*)ctx->data_map.holding_regs);
                 exception = MODBUS_EXCEPTION_ILLEGAL_DATA_ADDR;
                 break;
             }
-            
+
             ctx->tx_buf[0] = addr;
             ctx->tx_buf[1] = func;
             ctx->tx_buf[2] = count * 2;
@@ -340,6 +343,12 @@ void modbus_process(modbus_t *ctx) {
     if (!ctx->transport.get_tick) return;
     
     uint32_t now = ctx->transport.get_tick();
+    
+    /* TCP 端口驱动：accept/connect/重连/非阻塞收包+帧重组由端口层自行驱动。
+     * RTU 端口注册 port_poll=NULL，此调用为零开销空判。 */
+    if (ctx->transport.port_poll) {
+        ctx->transport.port_poll(ctx->transport.ctx);
+    }
     
     // 断线检测
     check_line_status(ctx);
@@ -488,17 +497,20 @@ void modbus_process(modbus_t *ctx) {
                 }
             } else {
                 if (ctx->rx_len >= 4) {
-                    uint8_t addr = ctx->rx_buf[0];
-                    if (addr == ctx->slave_addr || addr == MODBUS_BROADCAST_ADDR) {
-                        if (ctx->transport.frame_rx == NULL ||
-                            ctx->transport.frame_rx(ctx->transport.ctx, ctx->rx_buf, &ctx->rx_len) == 0) {
+                    /* 先帧校验、再查地址：TCP 的 frame_rx 会把线上帧重排为
+                     * [unit][func][data...]（unit 从 MBAP 取出），地址必须在重排后读；
+                     * RTU 的 frame_rx 只验 CRC 不改缓冲区，因此顺序调整对 RTU 无影响。 */
+                    if (ctx->transport.frame_rx == NULL ||
+                        ctx->transport.frame_rx(ctx->transport.ctx, ctx->rx_buf, &ctx->rx_len) == 0) {
+                        uint8_t addr = ctx->rx_buf[0];
+                        if (addr == ctx->slave_addr || addr == MODBUS_BROADCAST_ADDR) {
                             ctx->state = MODBUS_STATE_PROCESSING;
                             process_slave_request(ctx);
                         } else {
-                            MODBUS_LOG("Frame error");
+                            MODBUS_LOG("Addr mismatch: 0x%02X != 0x%02X", addr, ctx->slave_addr);
                         }
                     } else {
-                        MODBUS_LOG("Addr mismatch: 0x%02X != 0x%02X", addr, ctx->slave_addr);
+                        MODBUS_LOG("Frame error");
                     }
                     ctx->rx_len = 0;
                 }

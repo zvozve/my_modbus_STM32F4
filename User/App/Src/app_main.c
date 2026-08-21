@@ -17,6 +17,7 @@
 // Tasks
 #include "task_modbus.h"
 #include "task_modbus_m.h"
+#include "task_modbus_tcp.h"
 
 // ============================================
 // RTOS支持
@@ -75,13 +76,15 @@ static void App_BareMetal_Loop(void) {
 static void vAppTask(void *pvParameters) {
     // 初始化外设
     // TaskModbus_Init();      // 从机 UART2
-    TaskModbus_M_Init();    // 主机 UART1
+    // TaskModbus_M_Init();    // 主机 UART1
     heart_beat_init();
+    TaskModbus_TCP_Init();  // Modbus TCP 从机 :502
     
     // RTOS循环
     while (1) {
         // TaskModbus_Process();
-        TaskModbus_M_Process();
+        // TaskModbus_M_Process();
+        TaskModbus_TCP_Process();
 
         static uint32_t last_feed_time = 0;
         uint32_t current_time = xTaskGetTickCount();
