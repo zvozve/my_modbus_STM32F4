@@ -115,6 +115,8 @@ void Error_Handler(void);
 #define M_IN15_GPIO_Port GPIOE
 #define M_IN16_Pin GPIO_PIN_15
 #define M_IN16_GPIO_Port GPIOE
+#define ETH_RST_Pin GPIO_PIN_3
+#define ETH_RST_GPIO_Port GPIOD
 #define M_RL9_Pin GPIO_PIN_8
 #define M_RL9_GPIO_Port GPIOB
 #define M_RL10_Pin GPIO_PIN_9
