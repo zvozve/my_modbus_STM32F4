@@ -1,7 +1,7 @@
 #ifndef __SEGGER_RTT_LOG_H
 #define __SEGGER_RTT_LOG_H
 
-#define RTT_USE_RTOS       0
+#define RTT_USE_RTOS       1
 
 #include <stdint.h>
 

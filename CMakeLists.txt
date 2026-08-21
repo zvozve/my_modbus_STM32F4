@@ -48,8 +48,10 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 file(GLOB_RECURSE USER_SOURCES 
     "User/App/Src/*.c"
     "User/BSP/bsp_dwt/Src/*.c"
+    "User/BSP/bsp_gpio/Src/*.c"
     "User/BSP/bsp_uart/Src/*.c"
     "User/Hardware/heart_beat/Src/*.c"
+    "User/Hardware/lan8720a/Src/*.c"
     "User/Middleware/SEGGER_RTT/Src/*.c"
     "User/Protocols/modbus/Src/*.c"
     "User/Tasks/Src/*.c"
@@ -74,10 +76,12 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
     # BSP
     User/BSP/bsp_dwt/Inc
+    User/BSP/bsp_gpio/Inc    
     User/BSP/bsp_uart/Inc
     
     # Hardware
     User/Hardware/heart_beat/Inc
+    User/Hardware/lan8720a/Inc
     
     # Middleware
     User/Middleware/SEGGER_RTT/Inc

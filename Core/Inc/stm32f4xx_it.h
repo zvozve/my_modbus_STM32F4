@@ -62,6 +62,7 @@ void USART2_IRQHandler(void);
 void USART3_IRQHandler(void);
 void DMA2_Stream1_IRQHandler(void);
 void DMA2_Stream2_IRQHandler(void);
+void ETH_IRQHandler(void);
 void DMA2_Stream6_IRQHandler(void);
 void DMA2_Stream7_IRQHandler(void);
 void USART6_IRQHandler(void);

@@ -7,7 +7,7 @@
 void heart_beat_init(void)
 {
     MX_IWDG_Init();
-    SYS_LOG("heart_beat_init(iwdg) done\n");
+    SYS_LOG("heart_beat_init(iwdg) done");
 }
 
 void heart_beat_run(void)
