@@ -121,7 +121,7 @@
 #define APP_LOG(fmt, ...)     RTT_LOG_TAG(APP_LOG_ENABLE,    "APP",    fmt, ##__VA_ARGS__)
 
 #ifndef HEX_LOG_ENABLE
-    #define HEX_LOG_ENABLE     1
+    #define HEX_LOG_ENABLE     0
 #endif
 #define HEX_LOG(prefix, data, len) HEX_PRINT(HEX_LOG_ENABLE, prefix, data, len)
 

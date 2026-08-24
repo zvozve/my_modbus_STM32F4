@@ -110,6 +110,19 @@
 /*-----------------------------------------------------------------------------*/
 /* USER CODE BEGIN 1 */
 
+/* ===== Modbus TCP 多客户端：增大资源 + 开启监听积压 + 加速 TIME_WAIT 回收 =====
+ * 下列宏覆盖 opt.h 默认值（原值太保守）。
+ * 注意：会推高 RAM 占用，已实测编译看 %，必要时回退 PBUF/MEM_SIZE。 */
+#define MEMP_NUM_NETCONN                8      /* 原 4：1 listen + N client（N=4 需 5，留余量） */
+#define MEMP_NUM_TCP_PCB                8      /* 原 5：并发连接 + TIME_WAIT 滞留余量 */
+#define MEMP_NUM_TCP_PCB_LISTEN         8      /* 原 8：保持不变 */
+#define TCP_LISTEN_BACKLOG              1      /* 原 0：开启监听积压队列 */
+#define TCP_DEFAULT_LISTEN_BACKLOG      4      /* 并发握手挂起上限 */
+#define MEM_SIZE                        3072   /* 原 1600：多连接动态堆(LwIP 私有分配)，3072 兼顾 4 client 与 RAM 余量 */
+#define PBUF_POOL_SIZE                  20     /* 原 16：多连接收发包缓冲，20 覆盖 4 client */
+#define TCP_MSL                         3000   /* 原 60000(60s)：缩短 TIME_WAIT 回收到 ~6s */
+#define LWIP_TCP_KEEPALIVE              1      /* 开启保活，早检死连接 */
+
 /* USER CODE END 1 */
 
 #ifdef __cplusplus

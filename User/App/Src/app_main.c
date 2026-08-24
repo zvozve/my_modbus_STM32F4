@@ -24,10 +24,10 @@
 #define APP_TASK_MB_RTU_MASTER    0   /* RTU 主机 (UART1) */
 #endif
 #ifndef APP_TASK_MB_TCP_SERVER
-#define APP_TASK_MB_TCP_SERVER    0   /* TCP 服务器 (:502) */
+#define APP_TASK_MB_TCP_SERVER    1   /* TCP 服务器 (:502) */
 #endif
 #ifndef APP_TASK_MB_TCP_CLIENT
-#define APP_TASK_MB_TCP_CLIENT    1   /* TCP 客户端（多实例 master） */
+#define APP_TASK_MB_TCP_CLIENT    0   /* TCP 客户端（多实例 master） */
 #endif
 
 // Tasks（按开关条件包含）

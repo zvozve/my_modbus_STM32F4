@@ -72,7 +72,7 @@ Revision: $Rev: 13430 $
 #define SEGGER_RTT_MAX_NUM_UP_BUFFERS             (3)     // Max. number of up-buffers (T->H) available on this target    (Default: 3)
 #define SEGGER_RTT_MAX_NUM_DOWN_BUFFERS           (3)     // Max. number of down-buffers (H->T) available on this target  (Default: 3)
 
-#define BUFFER_SIZE_UP                            (8192)  // Size of the buffer for terminal output of target, up to host (Default: 1k)
+#define BUFFER_SIZE_UP                            (4096)  // Size of the buffer for terminal output of target, up to host (Default: 1k)
                                                            // 2026-08-18: 1024 → 8192。启动时 EM 初始化+波形+boot-push 日志突发约 3KB，
                                                            // 1024 环形缓冲会冲掉中间段（NO_BLOCK_SKIP 丢弃），导致抓不到
                                                            // "EM CH0: power-on HOLD" 等关键行。8KB 可完整容纳整个启动突发。
