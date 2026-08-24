@@ -15,9 +15,10 @@
 // Protocols
 
 // Tasks
-#include "task_modbus.h"
-#include "task_modbus_m.h"
-#include "task_modbus_tcp.h"
+#include "task_mb_rtu_slave.h"
+#include "task_mb_rtu_master.h"
+#include "task_mb_tcp_server.h"
+#include "task_mb_tcp_client.h"
 
 // ============================================
 // RTOS支持
@@ -78,17 +79,23 @@ static void vAppTask(void *pvParameters) {
     // TaskModbus_Init();      // 从机 UART2
     // TaskModbus_M_Init();    // 主机 UART1
     heart_beat_init();
+#if !MB_TCP_CLIENT_TEST_DISABLE_SERVER
     TaskModbus_TCP_Init();  // Modbus TCP 从机 :502
-    
+#endif
+    TaskModbus_TCP_Client_Init();  // Modbus TCP 主机（client）多实例测试
+
     // RTOS循环
     while (1) {
         // TaskModbus_Process();
         // TaskModbus_M_Process();
+#if !MB_TCP_CLIENT_TEST_DISABLE_SERVER
         TaskModbus_TCP_Process();
+#endif
+        TaskModbus_TCP_Client_Process();
 
         static uint32_t last_feed_time = 0;
         uint32_t current_time = xTaskGetTickCount();
-        if ((current_time - last_feed_time) >= pdMS_TO_TICKS(500)) {
+        if ((current_time - last_feed_time) >= pdMS_TO_TICKS(200)) {
             last_feed_time = current_time;
             heart_beat_run();
         }
@@ -101,7 +108,7 @@ static void App_RTOS_CreateTask(void) {
     xTaskCreate(
         vAppTask,               // 任务函数
         "AppTask",              // 任务名称
-        512,                    // 任务栈大小
+        1024,                   // 任务栈大小（LwIP + RTT 调用链较深，加大防溢出）
         NULL,                   // 任务参数
         osPriorityNormal,       // 任务优先级
         &xAppTaskHandle        // 任务句柄

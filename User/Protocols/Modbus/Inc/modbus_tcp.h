@@ -32,6 +32,7 @@ typedef struct {
     char remote_ip_str[16];     /* client: 远端 IP（可读字符串，重连时重新解析） */
     uint8_t is_server;          /* 1=server（从机侧），0=client（主机侧） */
     uint8_t is_connected;
+    uint8_t ever_connected;      /* client: 是否曾成功连上过（用于断线通知去抖，避免上电误报 BREAK） */
     int     slot_id;             /* 多客户端 server 槽下标（-1=非 slot / client 模式），仅供诊断日志 */
 
     /* 事务 ID */
@@ -45,6 +46,8 @@ typedef struct {
     uint16_t ready_len;
 
     uint32_t reconnect_tick;    /* client: 重连节拍 */
+    uint8_t  connecting;        /* client: 非阻塞 connect 进行中（已发起，未握手完成） */
+    uint32_t connect_start_tick;/* client: 本次 connect 发起时刻，用于连接超时判定 */
 } modbus_tcp_ctx_t;
 
 /* 多客户端 server 的客户端槽：内嵌一个完整 modbus_t（从机角色），

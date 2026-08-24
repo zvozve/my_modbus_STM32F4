@@ -9,6 +9,12 @@
 #define MODBUS_TCP_DIAG 1
 #endif
 
+/* 非阻塞 connect 超时：对端不回握手时超过此时长即放弃本次连接并重试，
+ * 绝不阻塞主循环（原阻塞 connect 在目标不可达时会永久挂起 → IWDG 复位）。 */
+#ifndef MB_TCP_CONNECT_TIMEOUT_MS
+#define MB_TCP_CONNECT_TIMEOUT_MS  3000
+#endif
+
 #include "lwip/api.h"       /* LwIP 2.1.x 的 netconn API 声明在 api.h（无 netconn.h） */
 #include "lwip/ip_addr.h"
 #include "lwip/netbuf.h"
@@ -69,8 +75,7 @@ int tcp_frame_rx(void *ctx, uint8_t *raw, uint16_t *raw_len) {
 static int tcp_send(void *ctx, const uint8_t *data, uint16_t len) {
     modbus_tcp_ctx_t *t = (modbus_tcp_ctx_t*)ctx;
     if (!t->is_connected || !t->conn) {
-        MODBUS_LOG("[TCP] TX drop: not connected, len=%u", len);
-        return -1;
+        return -1;   /* not connected：静默丢弃，避免未连接期高频打印阻塞主循环/喂狗 */
     }
     HEX_LOG("TCP-TX: ", data, len);   /* 实际交给 LwIP 的 MBAP 帧 */
     size_t written = 0;
@@ -152,29 +157,72 @@ static void tcp_port_poll(void *ctx) {
             }
         }
     } else {
-        /* ---- client：按 2s 间隔尝试(重)连接 ---- */
+        /* ---- client：按 2s 间隔尝试(重)连接（非阻塞，绝不卡主循环）---- */
         if (!t->is_connected) {
+            /* 未连接 → 线路视为断开：置 DISCONNECTED 让 master 仲裁器立即停发，
+             * 避免“未连上却每 tick 空转发帧 → 刷爆 RTT 日志 → 主循环阻塞/复位”的自旋。
+             * 同时持续刷新 core 的 reconnect_tick，压制 check_line_status 把
+             * DISCONNECTED 误翻回 OK（否则会每隔 reconnect_interval 触发一次空发自旋）。 */
+            if (t->mb->line_state != MODBUS_LINE_DISCONNECTED) {
+                t->mb->line_state = MODBUS_LINE_DISCONNECTED;
+                if (t->ever_connected && t->mb->on_line_break)
+                    t->mb->on_line_break(t->mb);
+            }
+            t->mb->reconnect_tick = now;   /* 压制 core 自动恢复 */
+
+            if (t->connecting) {
+                /* 非阻塞 connect 进行中：用 conn->state 判定握手是否完成，全程不阻塞
+                 * （原阻塞 connect 在目标不可达时会永久挂起 → IWDG 复位）。 */
+                struct netconn *nc = (struct netconn *)t->conn;
+                if (nc && nc->state == NETCONN_CONNECT) {
+                    /* 仍在握手：超时才放弃，避免无谓等待 */
+                    if (now - t->connect_start_tick >= MB_TCP_CONNECT_TIMEOUT_MS) {
+                        netconn_close(nc);
+                        netconn_delete(nc);
+                        t->conn = NULL;
+                        t->connecting = 0;
+                        MODBUS_LOG("[TCP] connect %s:%u timeout", t->remote_ip_str, t->port);
+                    }
+                    /* 否则继续等待（下个 tick 再来） */
+                } else {
+                    /* 握手已结束（state!=NETCONN_CONNECT）：成功则 peer 可读，失败则不可读 */
+                    ip_addr_t pa;
+                    u16_t     pp;
+                    if (nc && netconn_peer(nc, &pa, &pp) == ERR_OK) {
+                        t->is_connected = 1;
+                        t->connecting   = 0;
+                        t->ever_connected = 1;
+                        t->accum_len = 0;
+                        t->ready_len = 0;
+                        MODBUS_LOG("[TCP] connected to %s:%u", t->remote_ip_str, t->port);
+                        if (t->mb->line_state == MODBUS_LINE_DISCONNECTED) {
+                            t->mb->line_state = MODBUS_LINE_OK;
+                            if (t->mb->on_line_recover) t->mb->on_line_recover(t->mb);
+                        }
+                    } else {
+                        if (nc) { netconn_close(nc); netconn_delete(nc); }
+                        t->conn = NULL;
+                        t->connecting = 0;
+                        MODBUS_LOG("[TCP] connect %s:%u failed", t->remote_ip_str, t->port);
+                    }
+                }
+                return;   /* 连接中/刚结束：本 tick 不做 recv */
+            }
+
+            /* 未发起连接 → 按 2s 间隔发起一次非阻塞 connect */
             if (now - t->reconnect_tick >= 2000) {
                 t->reconnect_tick = now;
                 struct netconn *nc = netconn_new(NETCONN_TCP);
                 if (nc) {
+                    netconn_set_nonblocking(nc, 1);   /* ★ 必须在 connect 之前，否则 connect 阻塞 */
                     ip_addr_t ip;
                     if (ipaddr_aton(t->remote_ip_str, &ip)) {
                         err_t err = netconn_connect(nc, &ip, t->port);
-                        if (err == ERR_OK) {
-                            netconn_set_nonblocking(nc, 1);
+                        /* 非阻塞 connect：ERR_OK/INPROGRESS/ALREADY 均表示“已发起，待握手” */
+                        if (err == ERR_OK || err == ERR_INPROGRESS || err == ERR_ALREADY) {
                             t->conn = nc;
-                            t->is_connected = 1;
-                            t->accum_len = 0;
-                            t->ready_len = 0;
-                            MODBUS_LOG("[TCP] connected to %s:%u",
-                                       t->remote_ip_str, t->port);
-                            /* 重连成功 → 通知线路恢复（参考 RTU 主机 on_line_recover）。
-                             * 仅在确为断线恢复时触发，避免与 check_line_status 定时器重复。 */
-                            if (t->mb->line_state == MODBUS_LINE_DISCONNECTED) {
-                                t->mb->line_state = MODBUS_LINE_OK;
-                                if (t->mb->on_line_recover) t->mb->on_line_recover(t->mb);
-                            }
+                            t->connecting = 1;
+                            t->connect_start_tick = now;
                         } else {
                             netconn_close(nc);
                             netconn_delete(nc);

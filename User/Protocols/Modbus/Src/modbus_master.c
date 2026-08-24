@@ -145,8 +145,13 @@ typedef struct {
     uint16_t job_seq;                  /* 一次性作业入队序号（写+读共用，单调递增） */
 } mb_arbiter_t;
 
-/* 本工程单主机：静态分配（多主机场景需改为按 ctx 分配） */
-static mb_arbiter_t g_arbiter;
+/* 每主机实例独立仲裁器（原单全局 g_arbiter 在多主机下被后一次 init 的 memset 清掉、
+ * 所有实例 master_priv 指向同一块 → 多主机配置互相覆盖；表现为"最后初始化的主机
+ * 覆盖前面所有主机"，故出现 func=0x01 等反常）。改为按实例分配的小池，仅主机实例占用，
+ * 从机/服务器 slot 不占 RAM。 */
+#define MB_ARBITER_POOL_MAX   6   /* RTU 2 + TCP client 2 = 4，留余量 */
+static mb_arbiter_t g_arbiter_pool[MB_ARBITER_POOL_MAX];
+static int          g_arbiter_next = 0;
 
 static mb_arbiter_t *mb_get_arbiter(modbus_t *ctx) {
     return (ctx && ctx->master_priv) ? (mb_arbiter_t *)ctx->master_priv : NULL;
@@ -495,17 +500,22 @@ void modbus_master_init(modbus_t *ctx, const modbus_master_config_t *cfg) {
 
     ctx->poll_interval = cfg->poll_interval_ms ? cfg->poll_interval_ms : 100;
 
-    memset(&g_arbiter, 0, sizeof(g_arbiter));
-    g_arbiter.min_frame_gap_ms = cfg->min_frame_gap_ms ? cfg->min_frame_gap_ms
-                                                       : ctx->poll_interval;
+    if (g_arbiter_next >= MB_ARBITER_POOL_MAX) {
+        MODBUS_LOG("Master init FAILED: arbiter pool exhausted (%d)", MB_ARBITER_POOL_MAX);
+        return;
+    }
+    mb_arbiter_t *a = &g_arbiter_pool[g_arbiter_next++];
+    memset(a, 0, sizeof(*a));
+    a->min_frame_gap_ms = cfg->min_frame_gap_ms ? cfg->min_frame_gap_ms
+                                                : ctx->poll_interval;
 
-    ctx->master_priv = &g_arbiter;
+    ctx->master_priv = a;
     ctx->on_master_response = mb_on_master_response;
     ctx->poll_callback = mb_arbiter_tick;
 
     MODBUS_LOG("Master arbiter initialized, target=%d, poll=%lu ms, gap=%lu ms",
                cfg->target_slave_addr, (unsigned long)ctx->poll_interval,
-               (unsigned long)g_arbiter.min_frame_gap_ms);
+               (unsigned long)a->min_frame_gap_ms);
 }
 
 /* ===========================
