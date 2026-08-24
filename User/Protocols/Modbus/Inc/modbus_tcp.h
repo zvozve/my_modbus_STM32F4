@@ -7,27 +7,52 @@
 extern "C" {
 #endif
 
-/* 本文件内容依赖 MODBUS_ENABLE_TCP（在 modbus_core.h 定义，默认 1，可被 CMake -D 覆盖）。
- * 已强制 include modbus_core.h，保证门控宏一定已定义（与 modbus_rtu.h 同约定）。
- *
- * 本头文件保持 LwIP-free：netconn 指针以 void* 存放、远端 IP 以字符串传入，
- * 协议层头不依赖任何 BSP 类型；LwIP 头只在 modbus_tcp.c 内部（#ifdef 门内）引用。 */
+/* 本文件保持 LwIP-free：不 include 任何 lwip 头，不引用 netconn/pbuf 等类型。
+ * 网络栈调用通过 tcp_driver_t 抽象接口注入（类比 UART 的 uart_drv_t），
+ * 具体 netconn 实现在 modbus_tcp_adapter.c 中。 */
 
 #ifdef MODBUS_ENABLE_TCP
 
 #define MODBUS_TCP_DEFAULT_PORT   502
 #define MODBUS_TCP_MAX_CLIENTS    4   /* 同时在线客户端上限（N=4，按 RAM 调整） */
 
+/* ===========================
+ * tcp_driver_t — 抽象网络驱动接口（类比 UART 的 uart_drv_t）
+ * 协议层只通过此接口操作网络，永不见 netconn/socket/pbuf 等类型。
+ * 适配器（modbus_tcp_adapter.c）提供具体实现。 */
+typedef struct tcp_driver_t {
+    /* client 模式：创建 socket + 发起非阻塞 connect，返回连接句柄或 NULL */
+    void* (*client_open)(const char *ip, uint16_t port);
+    /* client 模式：轮询非阻塞 connect 状态
+     * 返回 1=已连上, 0=进行中, -1=失败(连接已被关闭) */
+    int   (*client_poll)(void *conn);
+    /* server 模式：创建+bind+listen，返回监听句柄或 NULL */
+    void* (*server_listen)(uint16_t port);
+    /* server 模式：非阻塞 accept，返回新连接句柄或 NULL(无挂起连接)
+     * 成功时填充 ip[] 和 *port */
+    void* (*server_accept)(void *listen, char *ip, uint16_t *port);
+    /* 发送：返回 0=成功(全部发出), -1=失败 */
+    int   (*send)(void *conn, const uint8_t *data, uint16_t len);
+    /* 接收：入口 *len=缓冲区容量；出口：
+     *   返回 1, *len=实际字节数 → 有数据
+     *   返回 0, *len=0 → 无数据(非阻塞, 稍后再来)
+     *   返回 -1 → 对端关闭(调用方应 close) */
+    int   (*recv)(void *conn, uint8_t *buf, uint16_t *len);
+    /* 关闭并释放连接 */
+    void  (*close)(void *conn);
+} tcp_driver_t;
+
 /* TCP 端口上下文（每实例一份）：
  *  - server(从机侧连接)：listen_conn 监听，accept 得 conn；应答回显请求 tid
  *  - client(主机侧连接)：conn 主动连接；每请求自增 tid 供应答匹配
- *  - 收包重组：netconn 是字节流，先累积到 accum，按 MBAP 长度字段切出完整帧
+ *  - 收包重组：TCP 是字节流，先累积到 accum，按 MBAP 长度字段切出完整帧
  *    放入 ready 单帧槽，core 的 peek/recv 从 ready 取；一次 TCP 段可能含多帧
  *    或半帧，port_poll 每个轮询节拍最多向 ready 投递一帧，天然逐帧串行。 */
 typedef struct {
     modbus_t *mb;               /* 关联的 core 实例 */
-    void *conn;                 /* 活动连接 netconn*（server: accept 所得 / client: 已连接） */
-    void *listen_conn;          /* server: 监听 netconn* */
+    const tcp_driver_t *driver; /* 网络驱动（netconn 实现，由适配器注入） */
+    void *conn;                 /* 活动连接句柄（server: accept 所得 / client: 已连接） */
+    void *listen_conn;          /* server: 监听句柄 */
     uint16_t port;              /* server: 监听端口；client: 远端端口 */
     char remote_ip_str[16];     /* client: 远端 IP（可读字符串，重连时重新解析） */
     uint8_t is_server;          /* 1=server（从机侧），0=client（主机侧） */
@@ -63,7 +88,8 @@ typedef struct {
 /* 多客户端 server 容器：持有监听 socket + N 个客户端 slot；
  * accept / 空闲踢(5s) / 上下线通知 全部由 modbus_tcp_server_process() 统一驱动。 */
 typedef struct {
-    void *listen_conn;                       /* 监听 netconn* */
+    const tcp_driver_t *driver;              /* 网络驱动（由适配器注入） */
+    void *listen_conn;                       /* 监听句柄 */
     uint16_t port;
     modbus_t *slave_tpl;                     /* 共享 data_map / slave_addr 的模板 */
     modbus_tcp_client_slot_t slots[MODBUS_TCP_MAX_CLIENTS];
@@ -71,19 +97,22 @@ typedef struct {
     void (*on_client_disconnect)(int client_id, const char *ip);
 } modbus_tcp_server_t;
 
-/* 从机(TCP server)多客户端适配器：mb 须先配好 data_map/slave_addr/变更回调。
- * 内部创建监听 socket 并预初始化 N 个客户端 slot（均共享 mb->data_map 指针）。
- * 返回 0=成功，<0=失败。每 tick 调用 modbus_tcp_server_process() 驱动。 */
-int  modbus_tcp_server_init(modbus_t *mb, modbus_tcp_server_t *srv, uint16_t port);
+/* ===========================
+ * 协议层 API（LwIP-free，由适配器调用）
+ * =========================== */
+
+/* 将 tcp_driver_t 绑定到 modbus 实例：填充 transport 回调表，
+ * 设置 mb->mode=TCP。drv 由调用方(适配器)提供。 */
+void modbus_tcp_attach_transport(modbus_t *mb, modbus_tcp_ctx_t *t,
+                                 const tcp_driver_t *drv);
+
+/* 初始化一个 server slot（不注册进全局实例表，避免 modbus_process_all 重复处理）。
+ * 共享模板的 data_map 指针。drv 由 server 容器传入。 */
+void modbus_tcp_slot_init(modbus_tcp_client_slot_t *s, const modbus_t *tpl,
+                          const tcp_driver_t *drv);
 
 /* 每 tick 调用：accept 新连接 → 逐 slot 处理 → 释放断开/空闲超时的 slot 并通知 */
 void modbus_tcp_server_process(modbus_tcp_server_t *srv);
-
-/* 主机(TCP client)适配器：modbus 实例须先 modbus_master_init()（传输无关仲裁器）。
- * 内部创建 socket 并尝试连接（失败由 port_poll 按 2s 间隔重连）。
- * 返回 0=成功（仅指参数合法，不代表已连上），<0=失败。 */
-int modbus_tcp_client_init(modbus_t *mb, modbus_tcp_ctx_t *tcp,
-                           const char *ip_str, uint16_t port);
 
 /* MBAP 帧封装（TCP 端口层专属）：
  *  - tcp_frame_tx: core 的 [unit][func][data...] → 线上 [tid][pid=0][len][unit][func][data...]

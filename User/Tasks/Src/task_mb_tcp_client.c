@@ -2,6 +2,7 @@
 #include "modbus_core.h"
 #include "modbus_master.h"
 #include "modbus_tcp.h"
+#include "modbus_tcp_adapter.h"
 #include "SEGGER_RTT_Log.h"
 
 /* 每个 client 实例的目标 + 测试行为（改成你 PC 上 Modbus TCP 从机的地址）。
@@ -92,8 +93,8 @@ void TaskModbus_TCP_Client_Init(void) {
         modbus_master_set_coil_change_callback(&g_mb[i], on_coil_change);
 
         /* 2. TCP 传输（client 模式：port_poll 负责 connect/2s 重连） */
-        modbus_tcp_client_init(&g_mb[i], &g_ctx[i],
-                               g_cli_cfg[i].ip, g_cli_cfg[i].port);
+        modbus_tcp_adapter_client_init(&g_mb[i], &g_ctx[i],
+                                        g_cli_cfg[i].ip, g_cli_cfg[i].port);
 
         /* 3. 断线通知 */
         modbus_set_line_callbacks(&g_mb[i], on_line_break, on_line_recover);

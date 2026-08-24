@@ -2,6 +2,7 @@
 #include "modbus_core.h"
 #include "modbus_master.h"
 #include "modbus_tcp.h"
+#include "modbus_tcp_adapter.h"
 #include "SEGGER_RTT_Log.h"
 #include "bsp_dwt.h"
 #include <math.h>
@@ -95,8 +96,8 @@ void TaskModbus_TCP_Init(void) {
 
     g_tcp_srv.on_client_connect    = tcp_on_client_connect;
     g_tcp_srv.on_client_disconnect = tcp_on_client_disconnect;
-    if (modbus_tcp_server_init(&g_modbus_tcp_srv, &g_tcp_srv,
-                               MODBUS_TCP_DEFAULT_PORT) == 0) {
+    if (modbus_tcp_adapter_server_init(&g_modbus_tcp_srv, &g_tcp_srv,
+                                         MODBUS_TCP_DEFAULT_PORT) == 0) {
         SYS_LOG("[TCP] Modbus multi-client server ready, WAVE_LENGTH=%d", WAVE_LENGTH);
     }
     
