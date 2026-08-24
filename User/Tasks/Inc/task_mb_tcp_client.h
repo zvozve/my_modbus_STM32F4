@@ -7,17 +7,13 @@
  * TCP client（主机/master）多实例测试任务
  *
  * 注册 MB_TCP_CLIENT_COUNT 个 client 实例，每个连一个远端 Modbus TCP 从机，
- * 验证“多 client 实例并存”+ 每个实例的读/写/断线通知。
+ * 验证"多 client 实例并存"+ 每个实例的读/写/断线通知。
  *
  * RAM 提示：每个 client 实例约 +1.5KB（modbus_t + ctx + 回读缓冲）。
- * 多实例测试时默认关掉 server（MB_TCP_CLIENT_TEST_DISABLE_SERVER=1）以腾出
- * ~6.9KB 给 client；如需 server 与 client 并存，把该宏设 0 并把 COUNT 限到 1。
+ * 与 server 并存时如 RAM 紧张，在 app_main.c 把 APP_TASK_MB_TCP_SERVER 设 0。
  * ============================================================ */
 #ifndef MB_TCP_CLIENT_COUNT
 #define MB_TCP_CLIENT_COUNT   2      /* 注册的 client 实例数（按需调大，受 RAM 限制） */
-#endif
-#ifndef MB_TCP_CLIENT_TEST_DISABLE_SERVER
-#define MB_TCP_CLIENT_TEST_DISABLE_SERVER  1   /* 1=测试期间关掉 server 省 RAM；0=server 并存(限 1 client) */
 #endif
 
 void TaskModbus_TCP_Client_Init(void);

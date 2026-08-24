@@ -14,11 +14,35 @@
 
 // Protocols
 
-// Tasks
+// ============================================
+// 任务开关（编辑此处 0/1 或用 CMake -D 覆盖）
+// ============================================
+#ifndef APP_TASK_MB_RTU_SLAVE
+#define APP_TASK_MB_RTU_SLAVE     0   /* RTU 从机 (UART2) */
+#endif
+#ifndef APP_TASK_MB_RTU_MASTER
+#define APP_TASK_MB_RTU_MASTER    0   /* RTU 主机 (UART1) */
+#endif
+#ifndef APP_TASK_MB_TCP_SERVER
+#define APP_TASK_MB_TCP_SERVER    0   /* TCP 服务器 (:502) */
+#endif
+#ifndef APP_TASK_MB_TCP_CLIENT
+#define APP_TASK_MB_TCP_CLIENT    1   /* TCP 客户端（多实例 master） */
+#endif
+
+// Tasks（按开关条件包含）
+#if APP_TASK_MB_RTU_SLAVE
 #include "task_mb_rtu_slave.h"
+#endif
+#if APP_TASK_MB_RTU_MASTER
 #include "task_mb_rtu_master.h"
+#endif
+#if APP_TASK_MB_TCP_SERVER
 #include "task_mb_tcp_server.h"
+#endif
+#if APP_TASK_MB_TCP_CLIENT
 #include "task_mb_tcp_client.h"
+#endif
 
 // ============================================
 // RTOS支持
@@ -42,8 +66,12 @@
 // ============================================
 #ifndef APP_USE_RTOS
 static void App_BareMetal_Init(void) {
-    // TaskModbus_Init();      // 从机 UART2
+#if APP_TASK_MB_RTU_SLAVE
+    TaskModbus_Init();      // 从机 UART2
+#endif
+#if APP_TASK_MB_RTU_MASTER
     TaskModbus_M_Init();    // 主机 UART1
+#endif
     heart_beat_init();
     App_BareMetal_Loop();
 }
@@ -61,8 +89,12 @@ static void App_BareMetal_Loop(void) {
         }
 
         // Modbus处理（每个循环都执行）
-        // TaskModbus_Process();
+#if APP_TASK_MB_RTU_SLAVE
+        TaskModbus_Process();
+#endif
+#if APP_TASK_MB_RTU_MASTER
         TaskModbus_M_Process();
+#endif
 
         bsp_DelayUS(1000);
     }
@@ -76,22 +108,34 @@ static void App_BareMetal_Loop(void) {
 
 static void vAppTask(void *pvParameters) {
     // 初始化外设
-    // TaskModbus_Init();      // 从机 UART2
-    // TaskModbus_M_Init();    // 主机 UART1
-    heart_beat_init();
-#if !MB_TCP_CLIENT_TEST_DISABLE_SERVER
-    TaskModbus_TCP_Init();  // Modbus TCP 从机 :502
+#if APP_TASK_MB_RTU_SLAVE
+    TaskModbus_Init();          // RTU 从机 UART2
 #endif
+#if APP_TASK_MB_RTU_MASTER
+    TaskModbus_M_Init();        // RTU 主机 UART1
+#endif
+    heart_beat_init();
+#if APP_TASK_MB_TCP_SERVER
+    TaskModbus_TCP_Init();      // Modbus TCP 从机 :502
+#endif
+#if APP_TASK_MB_TCP_CLIENT
     TaskModbus_TCP_Client_Init();  // Modbus TCP 主机（client）多实例测试
+#endif
 
     // RTOS循环
     while (1) {
-        // TaskModbus_Process();
-        // TaskModbus_M_Process();
-#if !MB_TCP_CLIENT_TEST_DISABLE_SERVER
+#if APP_TASK_MB_RTU_SLAVE
+        TaskModbus_Process();
+#endif
+#if APP_TASK_MB_RTU_MASTER
+        TaskModbus_M_Process();
+#endif
+#if APP_TASK_MB_TCP_SERVER
         TaskModbus_TCP_Process();
 #endif
+#if APP_TASK_MB_TCP_CLIENT
         TaskModbus_TCP_Client_Process();
+#endif
 
         static uint32_t last_feed_time = 0;
         uint32_t current_time = xTaskGetTickCount();
