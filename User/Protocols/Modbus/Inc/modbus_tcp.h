@@ -16,6 +16,7 @@ extern "C" {
 #ifdef MODBUS_ENABLE_TCP
 
 #define MODBUS_TCP_DEFAULT_PORT   502
+#define MODBUS_TCP_MAX_CLIENTS    4   /* 同时在线客户端上限（N=4，按 RAM 调整） */
 
 /* TCP 端口上下文（每实例一份）：
  *  - server(从机侧连接)：listen_conn 监听，accept 得 conn；应答回显请求 tid
@@ -31,6 +32,7 @@ typedef struct {
     char remote_ip_str[16];     /* client: 远端 IP（可读字符串，重连时重新解析） */
     uint8_t is_server;          /* 1=server（从机侧），0=client（主机侧） */
     uint8_t is_connected;
+    int     slot_id;             /* 多客户端 server 槽下标（-1=非 slot / client 模式），仅供诊断日志 */
 
     /* 事务 ID */
     uint16_t next_tx_tid;       /* client(master): 每发一请求自增 */
@@ -45,10 +47,34 @@ typedef struct {
     uint32_t reconnect_tick;    /* client: 重连节拍 */
 } modbus_tcp_ctx_t;
 
-/* 从机(TCP server)适配器：modbus 实例须先 modbus_init() 并设置 data_map/slave_addr。
- * 内部创建监听 socket 并注册 transport（frame_tx/frame_rx/port_poll 全部挂上）。
- * 返回 0=成功，<0=失败。 */
-int modbus_tcp_server_init(modbus_t *mb, modbus_tcp_ctx_t *tcp, uint16_t port);
+/* 多客户端 server 的客户端槽：内嵌一个完整 modbus_t（从机角色），
+ * 所有 slot 共享模板同一份 data_map（网关模型：多主站连同一设备，寄存器后写覆盖）。
+ * slot 的 transport 仅做 recv/帧重组/回显 tid，accept 由 server 容器统一驱动。 */
+typedef struct {
+    modbus_t  mb;            /* 完整实例，仅填从机相关字段 + 共享 data_map 指针 */
+    modbus_tcp_ctx_t tcp;    /* 本 slot 的 conn + accum + ready（is_server=1，应答回显 tid） */
+    uint8_t   active;        /* 1=已分配连接 */
+    char      ip[16];        /* 对端 IP 字符串，供 on_client_* 回调 */
+} modbus_tcp_client_slot_t;
+
+/* 多客户端 server 容器：持有监听 socket + N 个客户端 slot；
+ * accept / 空闲踢(5s) / 上下线通知 全部由 modbus_tcp_server_process() 统一驱动。 */
+typedef struct {
+    void *listen_conn;                       /* 监听 netconn* */
+    uint16_t port;
+    modbus_t *slave_tpl;                     /* 共享 data_map / slave_addr 的模板 */
+    modbus_tcp_client_slot_t slots[MODBUS_TCP_MAX_CLIENTS];
+    void (*on_client_connect)(int client_id, const char *ip);
+    void (*on_client_disconnect)(int client_id, const char *ip);
+} modbus_tcp_server_t;
+
+/* 从机(TCP server)多客户端适配器：mb 须先配好 data_map/slave_addr/变更回调。
+ * 内部创建监听 socket 并预初始化 N 个客户端 slot（均共享 mb->data_map 指针）。
+ * 返回 0=成功，<0=失败。每 tick 调用 modbus_tcp_server_process() 驱动。 */
+int  modbus_tcp_server_init(modbus_t *mb, modbus_tcp_server_t *srv, uint16_t port);
+
+/* 每 tick 调用：accept 新连接 → 逐 slot 处理 → 释放断开/空闲超时的 slot 并通知 */
+void modbus_tcp_server_process(modbus_tcp_server_t *srv);
 
 /* 主机(TCP client)适配器：modbus 实例须先 modbus_master_init()（传输无关仲裁器）。
  * 内部创建 socket 并尝试连接（失败由 port_poll 按 2s 间隔重连）。

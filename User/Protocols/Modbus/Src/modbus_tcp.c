@@ -3,6 +3,12 @@
 
 #ifdef MODBUS_ENABLE_TCP
 
+/* 诊断日志开关：1=打印每个 slot 的 recv/send 详情（定位多客户端哪个连接卡住），
+ * 实测稳定后可改 0 关闭以减少刷屏。 */
+#ifndef MODBUS_TCP_DIAG
+#define MODBUS_TCP_DIAG 1
+#endif
+
 #include "lwip/api.h"       /* LwIP 2.1.x 的 netconn API 声明在 api.h（无 netconn.h） */
 #include "lwip/ip_addr.h"
 #include "lwip/netbuf.h"
@@ -73,8 +79,8 @@ static int tcp_send(void *ctx, const uint8_t *data, uint16_t len) {
     err_t err = netconn_write_partly((struct netconn*)t->conn, data, len,
                                      NETCONN_COPY, &written);
     if (err != ERR_OK || written != len) {
-        MODBUS_LOG("[TCP] netconn_write err=%d len=%u written=%u",
-                   (int)err, len, (unsigned)written);
+        MODBUS_LOG("[TCP] slot%d netconn_write err=%d len=%u written=%u",
+                   (t->slot_id >= 0 ? t->slot_id : -1), (int)err, len, (unsigned)written);
         return -1;
     }
     return 0;
@@ -163,6 +169,12 @@ static void tcp_port_poll(void *ctx) {
                             t->ready_len = 0;
                             MODBUS_LOG("[TCP] connected to %s:%u",
                                        t->remote_ip_str, t->port);
+                            /* 重连成功 → 通知线路恢复（参考 RTU 主机 on_line_recover）。
+                             * 仅在确为断线恢复时触发，避免与 check_line_status 定时器重复。 */
+                            if (t->mb->line_state == MODBUS_LINE_DISCONNECTED) {
+                                t->mb->line_state = MODBUS_LINE_OK;
+                                if (t->mb->on_line_recover) t->mb->on_line_recover(t->mb);
+                            }
                         } else {
                             netconn_close(nc);
                             netconn_delete(nc);
@@ -193,10 +205,100 @@ static void tcp_port_poll(void *ctx) {
         t->is_connected = 0;
         t->accum_len = 0;
         t->ready_len = 0;
+        /* 对端关闭 → 通知线路断开（参考 RTU 主机 on_line_break）。
+         * 置 DISCONNECTED + 重置 reconnect_tick，避免 check_line_status 定时器在真正
+         * 重连成功前误触发恢复通知；重连由本函数按 2s 间隔驱动。 */
+        t->mb->line_state = MODBUS_LINE_DISCONNECTED;
+        t->mb->reconnect_tick = now;
+        if (t->mb->on_line_break) t->mb->on_line_break(t->mb);
         return;
     }
 
     tcp_extract_frame(t);
+}
+
+// ===========================
+// 多客户端 server：slot 轮询 / 空闲踢 / 初始化
+// ===========================
+/* slot 的 port_poll：只做 recv + 帧重组 + 对端关闭处理（不含 accept/connect）。
+ * 连接由 server 容器的 modbus_tcp_server_process 统一 accept 后挂入 slot。 */
+static void tcp_slot_port_poll(void *ctx) {
+    modbus_tcp_ctx_t *t = (modbus_tcp_ctx_t*)ctx;
+    if (!t->is_connected || !t->conn) return;
+
+    struct netbuf *nbuf = NULL;
+    err_t err = netconn_recv((struct netconn*)t->conn, &nbuf);
+    if (err == ERR_OK && nbuf) {
+        uint16_t got = 0;
+        for (struct pbuf *p = nbuf->p; p != NULL; p = p->next) {
+            if (p->len > 0) { tcp_accumulate(t, (const uint8_t*)p->payload, p->len); got += p->len; }
+        }
+        netbuf_delete(nbuf);
+        if (got > 0 && MODBUS_TCP_DIAG && t->slot_id >= 0)
+            MODBUS_LOG("[TCP] slot%d recv %u B", t->slot_id, got);
+    } else if (err == ERR_CLSD) {
+        MODBUS_LOG("[TCP] slot connection closed by peer");
+        netconn_close((struct netconn*)t->conn);
+        netconn_delete((struct netconn*)t->conn);
+        t->conn = NULL;
+        t->is_connected = 0;
+        t->accum_len = 0;
+        t->ready_len = 0;
+        return;
+    }
+
+    tcp_extract_frame(t);
+}
+
+/* slot 的 on_line_break：空闲超时（check_line_status 从机分支）触发 → 关闭本 slot socket。
+ * 真正释放 slot + 上下线通知在 modbus_tcp_server_process 循环里统一做。 */
+static void tcp_slot_line_break(modbus_t *ctx) {
+    modbus_tcp_ctx_t *t = (modbus_tcp_ctx_t*)ctx->transport.ctx;
+    if (t && t->conn) {
+        netconn_close((struct netconn*)t->conn);
+        netconn_delete((struct netconn*)t->conn);
+    }
+    if (t) { t->conn = NULL; t->is_connected = 0; }
+}
+
+/* 轻量初始化一个 slot（不注册进全局实例表，避免 modbus_process_all 重复处理）。
+ * 共享模板的 data_map 指针（不拷贝数据，符合多主站网关语义）。 */
+static void tcp_slot_init(modbus_tcp_client_slot_t *s, const modbus_t *tpl) {
+    memset(s, 0, sizeof(*s));
+    modbus_t *mb = &s->mb;
+    mb->slave_addr = tpl->slave_addr;
+    mb->role       = MODBUS_ROLE_SLAVE;
+    mb->mode       = MODBUS_MODE_TCP;
+    mb->state      = MODBUS_STATE_IDLE;
+    mb->line_state = MODBUS_LINE_OK;
+    mb->response_timeout   = 1000;
+    mb->slave_timeout_ms   = 5000;   /* 5s 无请求 → 踢下线（check_line_status 从机分支） */
+    mb->max_timeout_count  = 3;
+    mb->poll_interval      = 100;
+    mb->reconnect_interval = 10000;
+    mb->data_map = tpl->data_map;    /* 共享指针 */
+    mb->on_master_reg_change  = tpl->on_master_reg_change;
+    mb->on_master_coil_change = tpl->on_master_coil_change;
+    mb->on_line_break = tcp_slot_line_break;
+
+    modbus_tcp_ctx_t *t = &s->tcp;
+    memset(t, 0, sizeof(*t));
+    t->mb = mb;
+    t->slot_id = -1;                /* accept 时再赋具体下标 */
+    t->is_server = 1;                /* server 侧：应答回显请求 tid */
+    modbus_transport_t tr = {
+        .ctx       = t,
+        .send      = tcp_send,
+        .peek      = tcp_peek,
+        .recv      = tcp_recv,
+        .get_tick  = tcp_get_tick,
+        .delay     = tcp_delay,
+        .frame_tx  = tcp_frame_tx,
+        .frame_rx  = tcp_frame_rx,
+        .port_poll = tcp_slot_port_poll,
+    };
+    modbus_set_transport(mb, &tr);
+    mb->last_activity_tick = tcp_get_tick();
 }
 
 // ===========================
@@ -222,9 +324,9 @@ static void tcp_attach_transport(modbus_t *mb, modbus_tcp_ctx_t *t) {
     mb->last_activity_tick = tcp_get_tick();
 }
 
-int modbus_tcp_server_init(modbus_t *mb, modbus_tcp_ctx_t *tcp, uint16_t port) {
-    if (!mb || !tcp) return -1;
-    memset(tcp, 0, sizeof(*tcp));
+int modbus_tcp_server_init(modbus_t *mb, modbus_tcp_server_t *srv, uint16_t port) {
+    if (!mb || !srv) return -1;
+    memset(srv, 0, sizeof(*srv));
 
     struct netconn *ln = netconn_new(NETCONN_TCP);
     if (!ln) return -1;
@@ -238,14 +340,73 @@ int modbus_tcp_server_init(modbus_t *mb, modbus_tcp_ctx_t *tcp, uint16_t port) {
     }
     netconn_set_nonblocking(ln, 1);   /* 非阻塞 accept */
 
-    tcp->mb = mb;
-    tcp->is_server = 1;
-    tcp->port = port;
-    tcp->listen_conn = ln;
-    tcp_attach_transport(mb, tcp);
-    MODBUS_LOG("[TCP] server listening on :%u (unit id=%u)",
-               port, mb->slave_addr);
+    srv->listen_conn = ln;
+    srv->port = port;
+    srv->slave_tpl = mb;
+    for (int i = 0; i < MODBUS_TCP_MAX_CLIENTS; i++) {
+        tcp_slot_init(&srv->slots[i], mb);
+    }
+    MODBUS_LOG("[TCP] multi-client server listening on :%u (unit=%u, max=%d)",
+               port, mb->slave_addr, MODBUS_TCP_MAX_CLIENTS);
     return 0;
+}
+
+void modbus_tcp_server_process(modbus_tcp_server_t *srv) {
+    if (!srv || !srv->listen_conn) return;
+    uint32_t now = MB_GET_TICK();
+    ip_addr_t peer;
+    u16_t peer_port;
+
+    /* 1. 批量 accept 所有挂起连接（nonblocking，直到无连接）。
+     *    改为 while 循环：Modbus Poll 等工具常“同时”发起多连接，
+     *    若每 tick 只 accept 一次，并发连接会积压甚至被丢弃（表现为第二个 client 超时）。 */
+    struct netconn *nc = NULL;
+    while (netconn_accept((struct netconn*)srv->listen_conn, &nc) == ERR_OK && nc) {
+        int idx = -1;
+        for (int i = 0; i < MODBUS_TCP_MAX_CLIENTS; i++) {
+            if (!srv->slots[i].active) { idx = i; break; }
+        }
+        if (idx >= 0) {
+            modbus_tcp_client_slot_t *s = &srv->slots[idx];
+            netconn_set_nonblocking(nc, 1);
+            s->tcp.conn = nc;
+            s->tcp.is_connected = 1;
+            s->tcp.slot_id = idx;
+            s->tcp.accum_len = 0;
+            s->tcp.ready_len = 0;
+            s->tcp.last_rx_tid = 0;
+            s->active = 1;
+            s->mb.state = MODBUS_STATE_IDLE;
+            s->mb.line_state = MODBUS_LINE_OK;
+            s->mb.timeout_count = 0;
+            s->mb.last_activity_tick = now;
+            if (netconn_peer(nc, &peer, &peer_port) == ERR_OK)
+                ipaddr_ntoa_r(&peer, s->ip, sizeof(s->ip));
+            else
+                s->ip[0] = '\0';
+            MODBUS_LOG("[TCP] accept -> client %d (%s)", idx, s->ip);
+            if (srv->on_client_connect) srv->on_client_connect(idx, s->ip);
+        } else {
+            MODBUS_LOG("[TCP] max clients reached, reject");
+            netconn_close(nc);
+            netconn_delete(nc);
+        }
+        nc = NULL;  /* 防御：避免 while 条件误判（accept 返回非 OK 即退出，此处仅保险） */
+    }
+
+    /* 2. 逐 slot 处理；断开/空闲超时（on_line_break 已关 socket）则释放 + 通知 */
+    for (int i = 0; i < MODBUS_TCP_MAX_CLIENTS; i++) {
+        modbus_tcp_client_slot_t *s = &srv->slots[i];
+        if (!s->active) continue;
+        modbus_process(&s->mb);
+        if (!s->tcp.is_connected) {
+            MODBUS_LOG("[TCP] client %d disconnected", i);
+            if (srv->on_client_disconnect) srv->on_client_disconnect(i, s->ip);
+            s->active = 0;
+            s->tcp.conn = NULL;
+            s->ip[0] = '\0';
+        }
+    }
 }
 
 int modbus_tcp_client_init(modbus_t *mb, modbus_tcp_ctx_t *tcp,
