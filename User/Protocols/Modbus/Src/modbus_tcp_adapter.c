@@ -1,7 +1,7 @@
 #include "modbus_core.h"
 #include "modbus_tcp_adapter.h"
 
-#ifdef MODBUS_ENABLE_TCP
+#if MODBUS_ENABLE_TCP
 
 #include "SEGGER_RTT_Log.h"
 #include <string.h>

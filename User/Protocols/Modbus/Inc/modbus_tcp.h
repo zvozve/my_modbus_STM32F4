@@ -11,7 +11,7 @@ extern "C" {
  * 网络栈调用通过 tcp_driver_t 抽象接口注入（类比 UART 的 uart_drv_t），
  * 具体 netconn 实现在 modbus_tcp_adapter.c 中。 */
 
-#ifdef MODBUS_ENABLE_TCP
+#if MODBUS_ENABLE_TCP
 
 #define MODBUS_TCP_DEFAULT_PORT   502
 #define MODBUS_TCP_MAX_CLIENTS    4   /* 同时在线客户端上限（N=4，按 RAM 调整） */

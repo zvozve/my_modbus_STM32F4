@@ -3,7 +3,7 @@
 
 #include "modbus_core.h"
 
-#ifdef MODBUS_ENABLE_TCP
+#if MODBUS_ENABLE_TCP
 
 #include "modbus_tcp.h"   /* tcp_driver_t 等协议层类型 */
 #include "lwip/api.h"      /* netconn API（LwIP 头只在本适配器文件引用） */

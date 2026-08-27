@@ -1,7 +1,7 @@
-#include "modbus_core.h"    // 提供 MODBUS_ENABLE_TCP（默认 1，可被 CMake -D 覆盖）
+#include "modbus_core.h"    // 提供 MODBUS_ENABLE_TCP（默认 0，可被 CMake -D 覆盖）
 #include "modbus_tcp.h"
 
-#ifdef MODBUS_ENABLE_TCP
+#if MODBUS_ENABLE_TCP
 
 /* 诊断日志开关：1=打印每个 slot 的 recv/send 详情（定位多客户端哪个连接卡住），
  * 实测稳定后可改 0 关闭以减少刷屏。 */

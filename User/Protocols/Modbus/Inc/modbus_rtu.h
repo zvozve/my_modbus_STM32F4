@@ -11,7 +11,7 @@ extern "C" {
 
 #define MODBUS_RTU_CHAR_BITS    10  // 1起始位 + 8数据位 + 1停止位
 
-#ifdef MODBUS_ENABLE_RTU
+#if MODBUS_ENABLE_RTU
 
 typedef struct {
     uint32_t baudrate;

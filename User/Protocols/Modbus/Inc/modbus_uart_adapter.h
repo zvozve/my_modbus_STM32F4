@@ -4,7 +4,7 @@
 
 #include "modbus_core.h"
 
-#ifdef MODBUS_ENABLE_RTU
+#if MODBUS_ENABLE_RTU
 #include "bsp_uart_drv.h"
 
 #ifdef __cplusplus

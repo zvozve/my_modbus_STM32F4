@@ -1,6 +1,6 @@
 #include "modbus_uart_adapter.h"
 
-#ifdef MODBUS_ENABLE_RTU
+#if MODBUS_ENABLE_RTU
 #include "bsp_uart_drv.h"
 #include "modbus_rtu.h"
 #include "SEGGER_RTT_Log.h"

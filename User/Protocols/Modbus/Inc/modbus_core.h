@@ -34,7 +34,7 @@ extern "C" {
 // 传输开关（文件内宏门控，配合 CMake 统一引入所有源文件；带 #ifndef 守卫，可被 CMake -D 覆盖）
 // ===========================
 #ifndef MODBUS_ENABLE_RTU
-#define MODBUS_ENABLE_RTU   1
+#define MODBUS_ENABLE_RTU   0
 #endif
 #ifndef MODBUS_ENABLE_TCP
 #define MODBUS_ENABLE_TCP   1

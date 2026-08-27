@@ -2,7 +2,7 @@
 #include "modbus_rtu.h"
 #include <string.h>         // memcpy（rtu_frame_tx 使用）
 
-#ifdef MODBUS_ENABLE_RTU
+#if MODBUS_ENABLE_RTU
 
 // ===========================
 // CRC16（RTU 帧校验，纯算法，无 BSP 依赖）
