@@ -1,0 +1,4 @@
+此目录由 mystm32-sdk/tools/sync_lib.py 生成，请勿手工修改（会被下次拉取覆盖）。
+SDK 版本 : 0.3.0
+拉取时间 : 2026-08-29 18:46:57
+模块清单 : chip.oop_dwt, chip.platform, chip.oop_gpio, chip.oop_uart, chip.oop_iwdg, middleware.SEGGER_RTT, devices.heart_beat, devices.lan8720a, protocols.Modbus
