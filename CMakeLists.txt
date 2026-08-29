@@ -40,6 +40,10 @@ add_subdirectory(cmake/stm32cubemx)
 # Add my-stm32-sdk（由 `python sdk_run.py pull` 同步生成于 MySDK/，单源真相）
 add_subdirectory(MySDK)
 
+# 让 SDK 驱动读取工程侧 board_cfg.h 的功能开关（MB_BOARD_CFG 触发 SDK 头内 #include "board_cfg.h"）
+target_include_directories(mystm32 PUBLIC ${CMAKE_SOURCE_DIR}/User)
+target_compile_definitions(mystm32 PUBLIC MB_BOARD_CFG)
+
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
