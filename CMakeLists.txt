@@ -37,7 +37,7 @@ add_executable(${CMAKE_PROJECT_NAME})
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
-# Add my-stm32-sdk（由 `python sdk_run.py pull` 同步生成于 MySDK/，单源真相）
+# Add mystm32-sdk（由 `python sdk_run.py pull` 同步生成于 MySDK/，单源真相）
 add_subdirectory(MySDK)
 
 # 让 SDK 驱动读取工程侧 board_cfg.h 的功能开关（MB_BOARD_CFG 触发 SDK 头内 #include "board_cfg.h"）
@@ -82,7 +82,7 @@ list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 # Add linked libraries
 target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
-    mystm32            # my-stm32-sdk 组件（oop_*/devices/SEGGER_RTT/Modbus）
+    mystm32            # mystm32-sdk 组件（oop_*/devices/SEGGER_RTT/Modbus）
 
     # Add user defined libraries
 )
