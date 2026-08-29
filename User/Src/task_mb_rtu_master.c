@@ -1,10 +1,12 @@
 #include "task_mb_rtu_master.h"
-#include "bsp_uart_drv.h"
+#include "oop_uart_drv.h"
 #include "modbus_core.h"
 #include "modbus_master.h"
 #include "modbus_uart_adapter.h"
 #include "SEGGER_RTT_Log.h"
-#include "usart.h"
+#include "board_cfg.h"
+
+#if MODBUS_ENABLE_RTU
 
 // ===========================
 // 主机1 (UART1, 访问从机1)
@@ -63,7 +65,7 @@ static void uart_reconfig2(uint32_t baudrate) {
 // ===========================
 void TaskModbus_M_Init(void) {
     // ---- 主机1 (UART1, 访问从机1) ----
-    uart_drv_init(&g_uart_m1, &huart1, NULL);
+    uart_drv_init(&g_uart_m1, BOARD_UART1, NULL);
     uart_drv_reg_cb(&g_uart_m1, NULL, NULL, NULL);
     uart_reconfig1(115200);
 
@@ -85,7 +87,7 @@ void TaskModbus_M_Init(void) {
     modbus_master_add_coil_range(&g_modbus_m1, 0, 16, g_coil_data1, 16, 200, 100);
 
     // ---- 主机2 (UART2, 访问从机2) ----
-    uart_drv_init(&g_uart_m2, &huart2, NULL);
+    uart_drv_init(&g_uart_m2, BOARD_UART2, NULL);
     uart_drv_reg_cb(&g_uart_m2, NULL, NULL, NULL);
     uart_reconfig2(115200);
 
@@ -118,3 +120,5 @@ void TaskModbus_M_Process(void) {
     modbus_process(&g_modbus_m1);
     modbus_process(&g_modbus_m2);
 }
+
+#endif // MODBUS_ENABLE_RTU

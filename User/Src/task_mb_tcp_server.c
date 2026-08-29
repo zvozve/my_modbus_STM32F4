@@ -4,7 +4,7 @@
 #include "modbus_tcp.h"
 #include "modbus_tcp_adapter.h"
 #include "SEGGER_RTT_Log.h"
-#include "bsp_dwt.h"
+#include "oop_dwt.h"
 #include <math.h>
 #include <string.h>
 
@@ -41,7 +41,7 @@ static uint8_t  g_trigger_state = 0;
 // ===========================
 static inline uint32_t get_us_timestamp(void)
 {
-    return bsp_GetCycleCount() / (SystemCoreClock / 1000000);
+    return oop_GetCycleCount() / (SystemCoreClock / 1000000);
 }
 
 // ===========================

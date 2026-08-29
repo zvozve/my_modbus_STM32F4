@@ -1,11 +1,13 @@
 // task_modbus.c
 #include "task_mb_rtu_slave.h"
-#include "bsp_uart_drv.h"
+#include "oop_uart_drv.h"
 #include "modbus_core.h"
 #include "modbus_slave.h"
 #include "modbus_uart_adapter.h"
 #include "SEGGER_RTT_Log.h"
-#include "usart.h"
+#include "board_cfg.h"
+
+#if MODBUS_ENABLE_RTU
 
 // ===========================
 // 从机1 (UART1, 地址1)
@@ -103,7 +105,7 @@ static void slave2_update(void) {
 // ===========================
 void TaskModbus_Init(void) {
     // ---- 从机1 (UART1) ----
-    uart_drv_init(&g_uart1, &huart1, NULL);
+    uart_drv_init(&g_uart1, BOARD_UART1, NULL);
     uart_drv_reg_cb(&g_uart1, NULL, NULL, NULL);
     uart_reconfig1(115200);
 
@@ -125,7 +127,7 @@ void TaskModbus_Init(void) {
     modbus_uart_adapter_init(&g_modbus1, &g_uart1);
 
     // ---- 从机2 (UART2) ----
-    uart_drv_init(&g_uart2, &huart2, NULL);
+    uart_drv_init(&g_uart2, BOARD_UART2, NULL);
     uart_drv_reg_cb(&g_uart2, NULL, NULL, NULL);
     uart_reconfig2(115200);
 
@@ -159,3 +161,4 @@ void TaskModbus_Process(void) {
     modbus_process(&g_modbus2);
     slave2_update();
 }
+#endif

@@ -1,9 +1,10 @@
 #include "app_main.h"
 
-// Common
+// 板级绑定（唯一允许引用 MX 符号处：CPU_STA_*/ETH_RST_*/&huart/&hiwdg）
+#include "board_cfg.h"
 
-// BSP
-#include "bsp_dwt.h"
+// BSP（SDK OOP 封装）
+#include "oop_dwt.h"
 
 // Hardware
 #include "heart_beat.h"
@@ -72,7 +73,7 @@ static void App_BareMetal_Init(void) {
 #if APP_TASK_MB_RTU_MASTER
     TaskModbus_M_Init();    // 主机 UART1
 #endif
-    heart_beat_init();
+    heart_beat_init(BOARD_HEART_LED_PORT, BOARD_HEART_LED_PIN, BOARD_HEART_IWDG);
     App_BareMetal_Loop();
 }
 
@@ -80,10 +81,10 @@ static void App_BareMetal_Loop(void) {
     static uint32_t last_heartbeat = 0;
 
     while (1) {
-        uint32_t now = bsp_GetCycleCount();
+        uint32_t now = oop_GetCycleCount();
 
         // 心跳处理（500ms）
-        if (bsp_IsTimeout(last_heartbeat, 500000)) {
+        if (oop_IsTimeout(last_heartbeat, 500000)) {
             last_heartbeat = now;
             heart_beat_run();
         }
@@ -96,7 +97,7 @@ static void App_BareMetal_Loop(void) {
         TaskModbus_M_Process();
 #endif
 
-        bsp_DelayUS(1000);
+        oop_DelayUS(1000);
     }
 }
 #endif
@@ -114,7 +115,7 @@ static void vAppTask(void *pvParameters) {
 #if APP_TASK_MB_RTU_MASTER
     TaskModbus_M_Init();        // RTU 主机 UART1
 #endif
-    heart_beat_init();
+    heart_beat_init(BOARD_HEART_LED_PORT, BOARD_HEART_LED_PIN, BOARD_HEART_IWDG);
 #if APP_TASK_MB_TCP_SERVER
     TaskModbus_TCP_Init();      // Modbus TCP 从机 :502
 #endif
@@ -163,8 +164,8 @@ static void App_RTOS_CreateTask(void) {
 
 void App_Init(void) {
     // 基础硬件初始化
-    ETH_RST_Init();
-    bsp_InitDWT();
+    ETH_RST_Init(BOARD_ETH_RST_PORT, BOARD_ETH_RST_PIN);
+    oop_InitDWT();
     ETH_RST_Execute();
     
 #ifdef APP_USE_RTOS

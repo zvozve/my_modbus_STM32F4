@@ -1,0 +1,23 @@
+# SDK 拉取配置（本工程接入 my-stm32-sdk）
+# 仅 sdk 一项需填真实路径；换 SDK 目录改这一行即可，其余不变。
+# 用法: python sdk_run.py pull   （同步生成 MySDK/）
+
+sdk       = "C:/Container/Applications/Dev_STM32/my-stm32-sdk"
+dest      = "../MySDK"            # 相对 User/（本文件所在目录）上溯到工程根；根 CMakeLists 以 add_subdirectory(MySDK) 接入
+board_cfg = "board_cfg.h"         # 相对 User/；本工程已存在真实绑定，sync 不覆盖
+
+[modules]
+# ---- chip：MCU 片上外设 OOP 封装 ----
+"chip.oop_dwt"   = true   # DWT 微秒延时（app_main 心跳计时）
+"chip.oop_gpio"  = true   # GPIO 抽象（heart_beat / lan8720a 依赖）
+"chip.oop_uart"  = true   # UART 驱动（Modbus RTU 适配器 + glue uart_drv_init）
+"chip.oop_iwdg"  = true   # IWDG OOP 封装（heart_beat 依赖）
+"chip.platform"  = true   # HAL 统一入口（系列宏）
+
+# ---- devices：板载外挂器件 ----
+"devices.heart_beat" = true   # 心跳 LED + 喂狗
+"devices.lan8720a"   = true   # ETH PHY 复位
+
+# ---- middleware / protocols ----
+"middleware.SEGGER_RTT" = true   # RTT 实时日志
+"protocols.Modbus"     = true   # Modbus 协议栈（RTU/TCP 主从）

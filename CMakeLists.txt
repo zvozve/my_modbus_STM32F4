@@ -37,24 +37,19 @@ add_executable(${CMAKE_PROJECT_NAME})
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
+# Add my-stm32-sdk（由 `python sdk_run.py pull` 同步生成于 MySDK/，单源真相）
+add_subdirectory(MySDK)
+
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
 # ===========================
-# User 源代码
+# User 源代码（App + Tasks 已扁平为 Src/Inc；共享模块经 MySDK 引入）
 # ===========================
 file(GLOB_RECURSE USER_SOURCES 
-    "User/App/Src/*.c"
-    "User/BSP/bsp_dwt/Src/*.c"
-    "User/BSP/bsp_gpio/Src/*.c"
-    "User/BSP/bsp_uart/Src/*.c"
-    "User/Hardware/heart_beat/Src/*.c"
-    "User/Hardware/lan8720a/Src/*.c"
-    "User/Middleware/SEGGER_RTT/Src/*.c"
-    "User/Protocols/modbus/Src/*.c"
-    "User/Tasks/Src/*.c"
+    "User/Src/*.c"
 )
 
 # ===========================
@@ -65,32 +60,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 # ===========================
-# 头文件路径
+# 头文件路径（User 业务代码；SDK 头由 MySDK 以 PUBLIC 导出）
 # ===========================
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # App
-    User/App/Inc
-    
-    # Common
-    User/Common/Inc
-
-    # BSP
-    User/BSP/bsp_dwt/Inc
-    User/BSP/bsp_gpio/Inc    
-    User/BSP/bsp_uart/Inc
-    
-    # Hardware
-    User/Hardware/heart_beat/Inc
-    User/Hardware/lan8720a/Inc
-    
-    # Middleware
-    User/Middleware/SEGGER_RTT/Inc
-    
-    # Protocols
-    User/Protocols/modbus/Inc
-    
-    # Tasks
-    User/Tasks/Inc
+    User/Inc
+    User            # board_cfg.h（工程板级绑定，唯一允许 include main.h/usart.h 处）
 )
 
 # Add project symbols (macros)
@@ -104,6 +78,7 @@ list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 # Add linked libraries
 target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
+    mystm32            # my-stm32-sdk 组件（oop_*/devices/SEGGER_RTT/Modbus）
 
     # Add user defined libraries
 )
